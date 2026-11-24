@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 296" width="780" height="296" role="img" aria-label="bash-autosuggest terminal demo showing inline grey history suggestions, Alt+Right partial word accept, and Right Arrow full accept">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 296" width="780" height="296" role="img" aria-label="bash-autosuggest terminal demo showing real-time Bash syntax highlighting, inline grey history suggestions, Alt+Right partial word accept, and Right Arrow full accept">
   <defs>
     <linearGradient id="titlebar" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#21262d"/>
@@ -24,6 +24,9 @@
       .prompt-sep   { fill: #8b949e; }
       .prompt-dir   { fill: #58a6ff; font-weight: 600; }
       .cmd          { fill: #e6edf3; }
+      .hl-ok        { fill: #3fb950; }
+      .hl-err       { fill: #f85149; }
+      .hl-flag      { fill: #39c5cf; }
       .ghost        { fill: #6e7681; }
       .cursor-ghost { fill: #58a6ff; fill-opacity: 0.35; }
       .cursor-solid { fill: #58a6ff; fill-opacity: 0.85; }
@@ -68,8 +71,8 @@
   <text x="390" y="24" text-anchor="middle" class="title">bash — native GNU Readline · bash-autosuggest</text>
 
   <!-- Static Status Line -->
-  <text x="22" y="68" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">bash_autosuggest status</tspan></text>
-  <text x="22" y="92" class="mono" xml:space="preserve"><tspan class="dim">bash_autosuggest: </tspan><tspan class="ok">enabled</tspan><tspan class="dim"> (style="38;5;242", history_entries=10240)</tspan></text>
+  <text x="22" y="68" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-ok">bash_autosuggest</tspan><tspan class="cmd"> status</tspan></text>
+  <text x="22" y="92" class="mono" xml:space="preserve"><tspan class="dim">bash_autosuggest: </tspan><tspan class="ok">enabled</tspan><tspan class="dim"> (style="38;5;242", highlight=on, history_entries=10240)</tspan></text>
 
   <!-- Frame 0: Empty prompt -->
   <g class="frame f0">
@@ -78,34 +81,34 @@
     <text x="685" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Ready in Bash</text>
   </g>
 
-  <!-- Frame 1: 'g' + ghost (two-layer cursor sits UNDER 'i' so ghost never shifts) -->
+  <!-- Frame 1: 'g' (red unknown cmd) + ghost -->
   <g class="frame f1">
     <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user" fill-opacity="0">dev@linux</tspan><tspan class="prompt-sep" fill-opacity="0">:</tspan><tspan class="prompt-dir" fill-opacity="0">~/repo</tspan><tspan class="prompt-sep" fill-opacity="0">$ </tspan><tspan class="cmd" fill-opacity="0">g</tspan><tspan class="cursor-ghost">█</tspan></text>
-    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">g</tspan><tspan class="ghost">it log --oneline -n 3</tspan></text>
-    <rect x="536" y="252" width="222" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
-    <text x="647" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Instant ghost text (~0.1 ms)</text>
+    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-err">g</tspan><tspan class="ghost">it log --oneline -n 3</tspan></text>
+    <rect x="518" y="252" width="240" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="638" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Live highlight + ghost (~0.1 ms)</text>
   </g>
 
-  <!-- Frame 2: 'gi' + ghost -->
+  <!-- Frame 2: 'gi' (red unknown cmd) + ghost -->
   <g class="frame f2">
     <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user" fill-opacity="0">dev@linux</tspan><tspan class="prompt-sep" fill-opacity="0">:</tspan><tspan class="prompt-dir" fill-opacity="0">~/repo</tspan><tspan class="prompt-sep" fill-opacity="0">$ </tspan><tspan class="cmd" fill-opacity="0">gi</tspan><tspan class="cursor-ghost">█</tspan></text>
-    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">gi</tspan><tspan class="ghost">t log --oneline -n 3</tspan></text>
-    <rect x="536" y="252" width="222" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
-    <text x="647" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Instant ghost text (~0.1 ms)</text>
+    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-err">gi</tspan><tspan class="ghost">t log --oneline -n 3</tspan></text>
+    <rect x="518" y="252" width="240" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="638" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Live highlight + ghost (~0.1 ms)</text>
   </g>
 
-  <!-- Frame 3: 'git' + ghost -->
+  <!-- Frame 3: 'git' turns green immediately + ghost -->
   <g class="frame f3">
     <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user" fill-opacity="0">dev@linux</tspan><tspan class="prompt-sep" fill-opacity="0">:</tspan><tspan class="prompt-dir" fill-opacity="0">~/repo</tspan><tspan class="prompt-sep" fill-opacity="0">$ </tspan><tspan class="cmd" fill-opacity="0">git</tspan><tspan class="cursor-ghost">█</tspan></text>
-    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">git</tspan><tspan class="ghost"> log --oneline -n 3</tspan></text>
-    <rect x="536" y="252" width="222" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
-    <text x="647" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Instant ghost text (~0.1 ms)</text>
+    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-ok">git</tspan><tspan class="ghost"> log --oneline -n 3</tspan></text>
+    <rect x="530" y="252" width="228" height="24" rx="6" fill="#132a1e" stroke="#3fb950"/>
+    <text x="644" y="268" text-anchor="middle" class="badge-text" fill="#56d364">Valid command highlighted</text>
   </g>
 
   <!-- Frame 4: 'git ' + ghost -->
   <g class="frame f4">
     <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user" fill-opacity="0">dev@linux</tspan><tspan class="prompt-sep" fill-opacity="0">:</tspan><tspan class="prompt-dir" fill-opacity="0">~/repo</tspan><tspan class="prompt-sep" fill-opacity="0">$ </tspan><tspan class="cmd" fill-opacity="0">git </tspan><tspan class="cursor-ghost">█</tspan></text>
-    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">git </tspan><tspan class="ghost">log --oneline -n 3</tspan></text>
+    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-ok">git</tspan><tspan class="cmd"> </tspan><tspan class="ghost">log --oneline -n 3</tspan></text>
     <rect x="536" y="252" width="222" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
     <text x="647" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Matched from Bash history</text>
   </g>
@@ -113,29 +116,29 @@
   <!-- Frame 5: Alt+Right accepts one word ('log') -->
   <g class="frame f5">
     <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user" fill-opacity="0">dev@linux</tspan><tspan class="prompt-sep" fill-opacity="0">:</tspan><tspan class="prompt-dir" fill-opacity="0">~/repo</tspan><tspan class="prompt-sep" fill-opacity="0">$ </tspan><tspan class="cmd" fill-opacity="0">git log</tspan><tspan class="cursor-ghost">█</tspan></text>
-    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">git log</tspan><tspan class="ghost"> --oneline -n 3</tspan></text>
+    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-ok">git</tspan><tspan class="cmd"> log</tspan><tspan class="ghost"> --oneline -n 3</tspan></text>
     <rect x="526" y="252" width="232" height="24" rx="6" fill="#1f2937" stroke="#58a6ff"/>
     <text x="642" y="268" text-anchor="middle" class="badge-text" fill="#79c0ff">Alt + →  accept next word</text>
   </g>
 
-  <!-- Frame 6: Right Arrow accepts full remaining suggestion -->
+  <!-- Frame 6: Right Arrow accepts full remaining suggestion (flags highlighted cyan) -->
   <g class="frame f6">
-    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">git log --oneline -n 3</tspan><tspan class="cursor-solid">█</tspan></text>
+    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-ok">git</tspan><tspan class="cmd"> log </tspan><tspan class="hl-flag">--oneline</tspan><tspan class="cmd"> </tspan><tspan class="hl-flag">-n</tspan><tspan class="cmd"> 3</tspan><tspan class="cursor-solid">█</tspan></text>
     <rect x="530" y="252" width="228" height="24" rx="6" fill="#132a1e" stroke="#3fb950"/>
     <text x="644" y="268" text-anchor="middle" class="badge-text" fill="#56d364">→ / End  accept full line</text>
   </g>
 
   <!-- Frame 7: Enter executes cleanly -->
   <g class="frame f7">
-    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cmd">git log --oneline -n 3</tspan></text>
-    <text x="22" y="156" class="mono" xml:space="preserve"><tspan class="hash">3a90794</tspan><tspan class="ref"> (HEAD -&gt; main, tag: v0.1.1)</tspan><tspan class="cmd"> fix: UTF-8 width &amp; vi mode</tspan></text>
-    <text x="22" y="180" class="mono" xml:space="preserve"><tspan class="hash">223917b</tspan><tspan class="dim"> (tag: v0.1.0)</tspan><tspan class="cmd"> feat: native Readline autosuggestions</tspan></text>
-    <text x="22" y="204" class="mono" xml:space="preserve"><tspan class="hash">323d603</tspan><tspan class="cmd"> feat: initial Rust loadable builtin for Bash</tspan></text>
+    <text x="22" y="128" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="hl-ok">git</tspan><tspan class="cmd"> log </tspan><tspan class="hl-flag">--oneline</tspan><tspan class="cmd"> </tspan><tspan class="hl-flag">-n</tspan><tspan class="cmd"> 3</tspan></text>
+    <text x="22" y="156" class="mono" xml:space="preserve"><tspan class="hash">7f4c21a</tspan><tspan class="ref"> (HEAD -&gt; main, tag: v0.2.0)</tspan><tspan class="cmd"> feat: real-time syntax highlighting</tspan></text>
+    <text x="22" y="180" class="mono" xml:space="preserve"><tspan class="hash">3a90794</tspan><tspan class="dim"> (tag: v0.1.1)</tspan><tspan class="cmd"> fix: UTF-8 width &amp; vi mode</tspan></text>
+    <text x="22" y="204" class="mono" xml:space="preserve"><tspan class="hash">223917b</tspan><tspan class="dim"> (tag: v0.1.0)</tspan><tspan class="cmd"> feat: native Readline autosuggestions</tspan></text>
     <text x="22" y="236" class="mono" xml:space="preserve"><tspan class="prompt-user">dev@linux</tspan><tspan class="prompt-sep">:</tspan><tspan class="prompt-dir">~/repo</tspan><tspan class="prompt-sep">$ </tspan><tspan class="cursor-solid blink">█</tspan></text>
     <rect x="598" y="252" width="160" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
     <text x="678" y="268" text-anchor="middle" class="badge-text" fill="#8b949e">Enter · clean run</text>
   </g>
 
   <!-- Subtle bottom-left footer hint -->
-  <text x="22" y="268" class="badge-text" fill="#484f58">0 external crates · ~350 KB .so · 100% native Bash</text>
+  <text x="22" y="268" class="badge-text" fill="#484f58">0 external crates · ~390 KB .so · 100% native Bash</text>
 </svg>

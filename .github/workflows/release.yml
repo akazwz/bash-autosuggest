@@ -65,9 +65,10 @@ jobs:
           Architecture: ${{ matrix.deb_arch }}
           Depends: bash (>= 5.0), libc6 (>= 2.34)
           Maintainer: akazwz <50396286+akazwz@users.noreply.github.com>
-          Description: Native GNU Readline history autosuggestions for Bash
-           Zero-lag inline history autosuggestions implemented in Rust as a
-           Bash loadable builtin (.so) hooking GNU Readline directly.
+          Description: Native GNU Readline autosuggestions & syntax highlighting for Bash
+           Zero-lag inline history autosuggestions and real-time Bash syntax
+           highlighting implemented in Rust as a Bash loadable builtin (.so)
+           hooking GNU Readline directly.
            Enable in ~/.bashrc:
              enable -f /usr/lib/bash/bash_autosuggest.so bash_autosuggest && bash_autosuggest
           EOF
