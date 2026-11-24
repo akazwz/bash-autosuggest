@@ -32,23 +32,23 @@
       .ref         { fill: #a371f7; }
 
       .frame { opacity: 0; }
-      .f0 { animation: show0 7.2s steps(1, end) infinite; }
-      .f1 { animation: show1 7.2s steps(1, end) infinite; }
-      .f2 { animation: show2 7.2s steps(1, end) infinite; }
-      .f3 { animation: show3 7.2s steps(1, end) infinite; }
-      .f4 { animation: show4 7.2s steps(1, end) infinite; }
-      .f5 { animation: show5 7.2s steps(1, end) infinite; }
-      .f6 { animation: show6 7.2s steps(1, end) infinite; }
-      .f7 { animation: show7 7.2s steps(1, end) infinite; }
+      .f0 { animation: show0 4.8s steps(1, end) infinite; }
+      .f1 { animation: show1 4.8s steps(1, end) infinite; }
+      .f2 { animation: show2 4.8s steps(1, end) infinite; }
+      .f3 { animation: show3 4.8s steps(1, end) infinite; }
+      .f4 { animation: show4 4.8s steps(1, end) infinite; }
+      .f5 { animation: show5 4.8s steps(1, end) infinite; }
+      .f6 { animation: show6 4.8s steps(1, end) infinite; }
+      .f7 { animation: show7 4.8s steps(1, end) infinite; }
 
-      @keyframes show0 { 0% { opacity: 1; } 8% { opacity: 0; } 100% { opacity: 0; } }
-      @keyframes show1 { 0% { opacity: 0; } 8% { opacity: 1; } 10.5% { opacity: 0; } 100% { opacity: 0; } }
-      @keyframes show2 { 0% { opacity: 0; } 10.5% { opacity: 1; } 13% { opacity: 0; } 100% { opacity: 0; } }
-      @keyframes show3 { 0% { opacity: 0; } 13% { opacity: 1; } 15.5% { opacity: 0; } 100% { opacity: 0; } }
-      @keyframes show4 { 0% { opacity: 0; } 15.5% { opacity: 1; } 31% { opacity: 0; } 100% { opacity: 0; } }
-      @keyframes show5 { 0% { opacity: 0; } 31% { opacity: 1; } 48% { opacity: 0; } 100% { opacity: 0; } }
-      @keyframes show6 { 0% { opacity: 0; } 48% { opacity: 1; } 63% { opacity: 0; } 100% { opacity: 0; } }
-      @keyframes show7 { 0% { opacity: 0; } 63% { opacity: 1; } 100% { opacity: 1; } }
+      @keyframes show0 { 0% { opacity: 1; } 6% { opacity: 0; } 100% { opacity: 0; } }
+      @keyframes show1 { 0% { opacity: 0; } 6% { opacity: 1; } 8.5% { opacity: 0; } 100% { opacity: 0; } }
+      @keyframes show2 { 0% { opacity: 0; } 8.5% { opacity: 1; } 11% { opacity: 0; } 100% { opacity: 0; } }
+      @keyframes show3 { 0% { opacity: 0; } 11% { opacity: 1; } 13.5% { opacity: 0; } 100% { opacity: 0; } }
+      @keyframes show4 { 0% { opacity: 0; } 13.5% { opacity: 1; } 27% { opacity: 0; } 100% { opacity: 0; } }
+      @keyframes show5 { 0% { opacity: 0; } 27% { opacity: 1; } 43% { opacity: 0; } 100% { opacity: 0; } }
+      @keyframes show6 { 0% { opacity: 0; } 43% { opacity: 1; } 57% { opacity: 0; } 100% { opacity: 0; } }
+      @keyframes show7 { 0% { opacity: 0; } 57% { opacity: 1; } 100% { opacity: 1; } }
 
       .blink { animation: cursor-blink 1s steps(1, end) infinite; }
       @keyframes cursor-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0.15; } }
