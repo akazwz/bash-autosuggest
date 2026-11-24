@@ -1,28 +1,39 @@
 #!/usr/bin/env sh
-# One-line installer for bash-autosuggest:
-#   curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh
+# One-line installer / uninstaller for bash-autosuggest:
+#   Install:   curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh
+#   Uninstall: curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh -s -- --uninstall
 # Options:
 #   VERSION=v0.1.0   Install a specific release tag (default: latest)
 #   INSTALL_DIR=...  Target directory (default: $HOME/.local/lib)
-#   --update-bashrc  Append the loader snippet to ~/.bashrc if not already present
+#   --update-bashrc  Append a managed loader block to ~/.bashrc
+#   --uninstall      Remove installed .so and any managed loader block in ~/.bashrc
 
 set -eu
 
 REPO="akazwz/bash-autosuggest"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/lib}"
 TARGET_FILE="$INSTALL_DIR/bash_autosuggest.so"
+BASHRC="$HOME/.bashrc"
+MARK_START="# >>> bash-autosuggest >>>"
+MARK_END="# <<< bash-autosuggest <<<"
 UPDATE_BASHRC=0
+UNINSTALL=0
 
 for arg in "$@"; do
     case "$arg" in
         --update-bashrc) UPDATE_BASHRC=1 ;;
+        --uninstall) UNINSTALL=1 ;;
         -h|--help)
             cat <<'EOF'
-Usage: install.sh [--update-bashrc]
+Usage: install.sh [--update-bashrc | --uninstall]
+
+Options:
+  --update-bashrc  Append a managed loader block to ~/.bashrc
+  --uninstall      Remove bash_autosuggest.so and its managed block from ~/.bashrc
 
 Environment variables:
-  VERSION      Release tag to install (default: latest)
-  INSTALL_DIR  Install directory (default: $HOME/.local/lib)
+  VERSION          Release tag to install (default: latest)
+  INSTALL_DIR      Install directory (default: $HOME/.local/lib)
 EOF
             exit 0
             ;;
@@ -32,6 +43,36 @@ EOF
             ;;
     esac
 done
+
+remove_bashrc_block() {
+    if [ ! -f "$BASHRC" ]; then
+        return 0
+    fi
+    if grep -Fq "$MARK_START" "$BASHRC"; then
+        tmp_rc="$(mktemp)"
+        awk -v start="$MARK_START" -v end="$MARK_END" '
+            $0 == start { skip = 1; next }
+            $0 == end { skip = 0; next }
+            !skip { print }
+        ' "$BASHRC" > "$tmp_rc"
+        mv -f "$tmp_rc" "$BASHRC"
+        printf 'Removed managed bash-autosuggest block from %s\n' "$BASHRC"
+    elif grep -q 'bash_autosuggest' "$BASHRC"; then
+        printf 'Note: found manual bash_autosuggest lines in %s; please remove them manually.\n' "$BASHRC"
+    fi
+}
+
+if [ "$UNINSTALL" -eq 1 ]; then
+    if [ -f "$TARGET_FILE" ]; then
+        rm -f "$TARGET_FILE"
+        printf 'Removed %s\n' "$TARGET_FILE"
+    else
+        printf '%s not found (already removed).\n' "$TARGET_FILE"
+    fi
+    remove_bashrc_block
+    printf 'Uninstall complete. Open a new terminal or run: exec bash\n'
+    exit 0
+fi
 
 OS="$(uname -s)"
 if [ "$OS" != "Linux" ]; then
@@ -106,20 +147,20 @@ mv -f "${TMP_DIR}/${ASSET}" "$TARGET_FILE"
 
 printf 'Installed to %s\n' "$TARGET_FILE"
 
-LOADER_SNIPPET="# Enable native Readline history autosuggestions (bash-autosuggest)
+LOADER_BLOCK="${MARK_START}
 if [[ \$- == *i* && -f \"$TARGET_FILE\" ]]; then
     enable -f \"$TARGET_FILE\" bash_autosuggest 2>/dev/null && bash_autosuggest
-fi"
+fi
+${MARK_END}"
 
 if [ "$UPDATE_BASHRC" -eq 1 ]; then
-    BASHRC="$HOME/.bashrc"
     if [ -f "$BASHRC" ] && grep -q 'bash_autosuggest' "$BASHRC"; then
-        printf '~/.bashrc already references bash_autosuggest; skipped modifying it.\n'
+        printf '%s already references bash_autosuggest; skipped modifying it.\n' "$BASHRC"
     else
-        printf '\n%s\n' "$LOADER_SNIPPET" >> "$BASHRC"
-        printf 'Added loader snippet to %s\n' "$BASHRC"
+        printf '\n%s\n' "$LOADER_BLOCK" >> "$BASHRC"
+        printf 'Added managed loader block to %s\n' "$BASHRC"
     fi
     printf 'Start a new shell or run: exec bash\n'
 else
-    printf '\nAdd the following to your ~/.bashrc:\n\n%s\n\nThen open a new terminal or run: exec bash\n' "$LOADER_SNIPPET"
+    printf '\nAdd the following to your ~/.bashrc:\n\n%s\n\nThen open a new terminal or run: exec bash\n' "$LOADER_BLOCK"
 fi

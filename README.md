@@ -57,10 +57,16 @@ Downloads the latest prebuilt `.so` from GitHub Releases, verifies `SHA256SUMS`,
 curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh
 ```
 
-To also append the loader snippet to `~/.bashrc` automatically:
+To also append a managed loader block to `~/.bashrc` automatically:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh -s -- --update-bashrc
+```
+
+To uninstall (removes `~/.local/lib/bash_autosuggest.so` and the managed `~/.bashrc` block):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh -s -- --uninstall
 ```
 
 ### 2. Debian / Ubuntu `.deb` package
