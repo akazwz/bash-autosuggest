@@ -294,6 +294,105 @@ def test_dumb_term(so_path: str) -> None:
         cleanup(pid, fd, hist_path)
 
 
+def test_syntax_highlighting(so_path: str) -> None:
+    history = ["echo hello world", "definitely_not_a_cmd arg"]
+    pid, fd, hist_path = spawn_bash(so_path, history, cols=80)
+    try:
+        # 1. Valid builtin ('echo'), flag ('-n'), string ('"hi $USER"'), pipe, comment.
+        os.write(fd, b'echo -n "hi $USER" | cat # note')
+        out, _ = read_until_idle(fd, idle=0.2)
+        assert b"\x1b[32mecho\x1b[0m" in out, f"Builtin 'echo' not green: {out!r}"
+        assert b"\x1b[36m-n\x1b[0m" in out, f"Option '-n' not cyan: {out!r}"
+        assert b'\x1b[33m"hi \x1b[0m\x1b[36m$USER\x1b[0m\x1b[33m"\x1b[0m' in out, (
+            f"String/variable highlighting failed: {out!r}"
+        )
+        assert b"\x1b[35m|\x1b[0m" in out, f"Pipe operator not magenta: {out!r}"
+        assert b"\x1b[32mcat\x1b[0m" in out, f"External PATH command 'cat' not green: {out!r}"
+        assert b"\x1b[90m# note\x1b[0m" in out, f"Comment not dim gray: {out!r}"
+        print("[PASS] Syntax highlighting: builtin, PATH cmd, option, string, var, pipe, comment")
+
+        # Clear line.
+        os.write(fd, b"\x05\x15")
+        read_until_idle(fd, idle=0.15)
+
+        # 2. Invalid command highlighted red, existing path underlined.
+        os.write(fd, f"definitely_not_a_cmd {hist_path}".encode())
+        out, _ = read_until_idle(fd, idle=0.2)
+        assert b"\x1b[31mdefinitely_not_a_cmd\x1b[0m" in out, (
+            f"Invalid command not red: {out!r}"
+        )
+        assert f"\x1b[4m{hist_path}\x1b[0m".encode() in out, (
+            f"Existing path not underlined: {out!r}"
+        )
+        print("[PASS] Syntax highlighting: invalid command (red) & existing path (underline)")
+
+        # Clear line.
+        os.write(fd, b"\x05\x15")
+        read_until_idle(fd, idle=0.15)
+
+        # 3. Runtime Bash alias & function detected in-process as valid (green).
+        os.write(fd, b"alias my_test_alias='echo ok'; my_test_fn() { :; }\n")
+        read_until_idle(fd, idle=0.2)
+
+        os.write(fd, b"my_test_alias")
+        out, _ = read_until_idle(fd, idle=0.15)
+        assert b"\x1b[32mmy_test_alias\x1b[0m" in out, f"Alias not green: {out!r}"
+
+        os.write(fd, b"\x05\x15")
+        read_until_idle(fd, idle=0.15)
+
+        os.write(fd, b"my_test_fn")
+        out, _ = read_until_idle(fd, idle=0.15)
+        assert b"\x1b[32mmy_test_fn\x1b[0m" in out, f"Function not green: {out!r}"
+        print("[PASS] Syntax highlighting: live Bash aliases & shell functions")
+
+        # Clear line.
+        os.write(fd, b"\x05\x15")
+        read_until_idle(fd, idle=0.15)
+
+        # 4. Cursor in middle of line still highlights cleanly, and wrapped lines work.
+        os.write(fd, b"echo foo")
+        read_until_idle(fd, idle=0.15)
+        os.write(fd, b"\x1b[D\x1b[D")
+        out, _ = read_until_idle(fd, idle=0.15)
+        assert b"\x1b[32mecho\x1b[0m" in out, f"Mid-line cursor lost highlighting: {out!r}"
+        print("[PASS] Syntax highlighting preserved when cursor is mid-line")
+
+        os.write(fd, b"\x05\x15")
+        read_until_idle(fd, idle=0.15)
+        set_winsize(fd, 24, 14)
+        os.write(fd, b"echo 1234567890")
+        out, _ = read_until_idle(fd, idle=0.2)
+        assert b"\x1b[32mecho\x1b[0m" in out and b"1234567890" in out, (
+            f"Wrapped line highlighting failed: {out!r}"
+        )
+        print("[PASS] Syntax highlighting on wrapped multi-row lines")
+
+        # 5. Runtime toggle: `bash_autosuggest highlight off` disables syntax colors while keeping ghost text.
+        set_winsize(fd, 24, 80)
+        os.write(fd, b"\x05\x15")
+        os.write(fd, b"bash_autosuggest highlight off && bash_autosuggest status\n")
+        out, _ = read_until_idle(fd, idle=0.25)
+        assert b"highlight=off" in out, f"Expected highlight=off in status: {out!r}"
+
+        os.write(fd, b"echo ")
+        out, _ = read_until_idle(fd, idle=0.15)
+        assert b"\x1b[32mecho\x1b[0m" not in out, f"Highlight remained after highlight off: {out!r}"
+        assert b"\x1b[38;5;242mhello world\x1b[0m" in out, (
+            f"Ghost text should still work with highlight off: {out!r}"
+        )
+
+        # Re-enable highlight.
+        os.write(fd, b"\x05\x15bash_autosuggest highlight on\n")
+        read_until_idle(fd, idle=0.2)
+        os.write(fd, b"echo ")
+        out, _ = read_until_idle(fd, idle=0.15)
+        assert b"\x1b[32mecho\x1b[0m" in out, f"Highlight did not resume after highlight on: {out!r}"
+        print("[PASS] Runtime highlight off/on toggle preserves autosuggestions")
+    finally:
+        cleanup(pid, fd, hist_path)
+
+
 def test_10k_history_stress(so_path: str) -> None:
     history = ["agy target-at-very-beginning"] + [f"cmd_{i} --arg={i}" for i in range(10_000)]
     pid, fd, hist_path = spawn_bash(so_path, history, cols=80)
@@ -318,6 +417,7 @@ def main() -> int:
     test_core_interactions(so_path)
     test_vi_mode_and_style(so_path)
     test_dumb_term(so_path)
+    test_syntax_highlighting(so_path)
     test_10k_history_stress(so_path)
     print("All PTY E2E tests passed!")
     return 0

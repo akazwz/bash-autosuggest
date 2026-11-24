@@ -57,6 +57,15 @@ pub type RlVoidFunc = unsafe extern "C" fn();
 /// Readline hook callback (`rl_hook_func_t`, used by `rl_pre_input_hook`).
 pub type RlHookFunc = unsafe extern "C" fn() -> c_int;
 
+/// Bash lookup function signature (`find_shell_builtin`, `find_function`, `find_alias`).
+pub type BashLookupFunc = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+
+/// Readline `rl_mark_active_p()` signature (Readline 8.1+).
+pub type RlIntVoidFunc = unsafe extern "C" fn() -> c_int;
+
+/// `RTLD_DEFAULT` handle on Linux glibc (`(void *) 0`).
+pub const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut();
+
 /// Bash `WORD_DESC` from `command.h`.
 #[repr(C)]
 pub struct WordDesc {
@@ -146,7 +155,8 @@ unsafe extern "C" {
     pub static mut history_length: c_int;
     pub fn history_list() -> *mut *mut HistEntry;
 
-    // --- C stdio ---
+    // --- C stdio & dynamic linker ---
     pub fn fwrite(ptr: *const c_void, size: usize, nmemb: usize, stream: *mut File) -> usize;
     pub fn fflush(stream: *mut File) -> c_int;
+    pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }

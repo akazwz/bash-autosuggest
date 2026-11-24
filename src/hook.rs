@@ -7,14 +7,20 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ptr;
 
 use crate::ffi::{
-    ISFUNC, Keymap, RL_STATE_SUPPRESS_MASK, RlCommandFunc, RlHookFunc, RlVoidFunc,
-    emacs_standard_keymap, fflush, fwrite, history_length, history_list, rl_bind_keyseq_in_map,
-    rl_display_prompt, rl_done, rl_end, rl_end_of_line, rl_forward_char, rl_forward_word,
-    rl_function_of_keyseq_len, rl_get_keymap, rl_get_screen_size, rl_insert_text, rl_line_buffer,
-    rl_newline, rl_outstream, rl_point, rl_pre_input_hook, rl_prompt, rl_readline_state,
-    rl_redisplay, rl_redisplay_function, vi_insertion_keymap, vi_movement_keymap,
+    BashLookupFunc, ISFUNC, Keymap, RL_STATE_SUPPRESS_MASK, RTLD_DEFAULT, RlCommandFunc,
+    RlHookFunc, RlIntVoidFunc, RlVoidFunc, dlsym, emacs_standard_keymap, fflush, fwrite,
+    history_length, history_list, rl_bind_keyseq_in_map, rl_display_prompt, rl_done, rl_end,
+    rl_end_of_line, rl_forward_char, rl_forward_word, rl_function_of_keyseq_len, rl_get_keymap,
+    rl_get_screen_size, rl_insert_text, rl_line_buffer, rl_newline, rl_outstream, rl_point,
+    rl_pre_input_hook, rl_prompt, rl_readline_state, rl_redisplay, rl_redisplay_function,
+    vi_insertion_keymap, vi_movement_keymap,
+};
+use crate::highlight::{
+    CommandResolver, MAX_HIGHLIGHT_LEN, PathExecCache, Span, compute_repaint_plan,
+    emit_move_to_line_start, highlight_line, parse_bool_env, render_highlighted_into,
 };
 use crate::suggest::{
     find_suggestion_bytes, is_supported_term, next_word_prefix, remaining_line_columns,
@@ -73,11 +79,153 @@ impl BindingLookup {
     }
 }
 
+/// Optional Bash / Readline symbols resolved dynamically via `dlsym(RTLD_DEFAULT, ...)`
+/// so the `.so` stays ABI-compatible across Linux distributions and Bash 5.x builds.
+#[derive(Clone, Copy)]
+struct DynamicSymbols {
+    find_shell_builtin: Option<BashLookupFunc>,
+    find_function: Option<BashLookupFunc>,
+    find_alias: Option<BashLookupFunc>,
+    rl_mark_active_p: Option<RlIntVoidFunc>,
+    horizontal_scroll_mode: *const c_int,
+}
+
+impl DynamicSymbols {
+    const fn empty() -> Self {
+        Self {
+            find_shell_builtin: None,
+            find_function: None,
+            find_alias: None,
+            rl_mark_active_p: None,
+            horizontal_scroll_mode: ptr::null(),
+        }
+    }
+
+    /// Resolve optional symbols from the host Bash process.
+    ///
+    /// # Safety
+    /// Must be called on Bash's main thread inside a loaded Bash process.
+    unsafe fn resolve() -> Self {
+        // SAFETY: Resolving standard Bash 5.x and Readline 8.x symbols with `dlsym`;
+        // every symbol is checked for null and cast to its documented C ABI signature.
+        unsafe {
+            Self {
+                find_shell_builtin: resolve_lookup_fn(c"find_shell_builtin"),
+                find_function: resolve_lookup_fn(c"find_function"),
+                find_alias: resolve_lookup_fn(c"find_alias"),
+                rl_mark_active_p: resolve_int_void_fn(c"rl_mark_active_p"),
+                horizontal_scroll_mode: dlsym(RTLD_DEFAULT, c"_rl_horizontal_scroll_mode".as_ptr())
+                    .cast::<c_int>(),
+            }
+        }
+    }
+
+    /// Returns `true` if Readline's active-region (e.g. bracketed paste) highlight is active.
+    ///
+    /// # Safety
+    /// Must be called from Bash's main thread during a Readline callback.
+    unsafe fn is_mark_active(&self) -> bool {
+        if let Some(f) = self.rl_mark_active_p {
+            // SAFETY: `rl_mark_active_p` is a Readline main-thread query function.
+            unsafe { f() != 0 }
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if Readline horizontal scroll mode is currently enabled.
+    ///
+    /// # Safety
+    /// Must be called from Bash's main thread during a Readline callback.
+    unsafe fn is_horizontal_scroll(&self) -> bool {
+        if self.horizontal_scroll_mode.is_null() {
+            false
+        } else {
+            // SAFETY: `_rl_horizontal_scroll_mode` is a Readline global `int`.
+            unsafe { *self.horizontal_scroll_mode != 0 }
+        }
+    }
+}
+
+unsafe fn resolve_lookup_fn(name: &CStr) -> Option<BashLookupFunc> {
+    // SAFETY: Caller guarantees `name` is a Bash lookup symbol taking `const char *` and returning a pointer.
+    unsafe {
+        let ptr = dlsym(RTLD_DEFAULT, name.as_ptr());
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute::<*mut c_void, BashLookupFunc>(ptr))
+        }
+    }
+}
+
+unsafe fn resolve_int_void_fn(name: &CStr) -> Option<RlIntVoidFunc> {
+    // SAFETY: Caller guarantees `name` is a Readline function with signature `int fn(void)`.
+    unsafe {
+        let ptr = dlsym(RTLD_DEFAULT, name.as_ptr());
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute::<*mut c_void, RlIntVoidFunc>(ptr))
+        }
+    }
+}
+
+/// Zero-fork in-process command resolver backed by cached `$PATH` + Bash lookup symbols.
+struct BashResolver<'a> {
+    syms: DynamicSymbols,
+    path_cache: &'a mut PathExecCache,
+    cstr_buf: &'a mut Vec<u8>,
+}
+
+impl BashResolver<'_> {
+    fn lookup_bash_symbol(&mut self, func: Option<BashLookupFunc>, word: &str) -> bool {
+        let Some(f) = func else {
+            return false;
+        };
+        if word.as_bytes().contains(&0) {
+            return false;
+        }
+        self.cstr_buf.clear();
+        self.cstr_buf.extend_from_slice(word.as_bytes());
+        self.cstr_buf.push(0);
+        // SAFETY: `self.cstr_buf` is NUL-terminated and `f` is a resolved Bash lookup function
+        // invoked synchronously on Bash's main thread.
+        unsafe { !f(self.cstr_buf.as_ptr().cast::<c_char>()).is_null() }
+    }
+}
+
+impl CommandResolver for BashResolver<'_> {
+    fn command_exists(&mut self, word: &str) -> bool {
+        if word.is_empty() {
+            return false;
+        }
+        if self.path_cache.has_executable(word) {
+            return true;
+        }
+        if word.contains('/') {
+            return false;
+        }
+        self.lookup_bash_symbol(self.syms.find_shell_builtin, word)
+            || self.lookup_bash_symbol(self.syms.find_alias, word)
+            || self.lookup_bash_symbol(self.syms.find_function, word)
+    }
+
+    fn path_exists(&mut self, word: &str) -> bool {
+        self.path_cache.check_path_exists(word)
+    }
+}
+
 struct HookState {
     enabled: bool,
+    highlight_enabled: bool,
     ghost_drawn: bool,
     suggestion: String,
     out_buf: Vec<u8>,
+    spans: Vec<Span>,
+    cstr_buf: Vec<u8>,
+    path_cache: Option<PathExecCache>,
+    syms: DynamicSymbols,
     style: String,
     orig_redisplay: Option<RlVoidFunc>,
     orig_pre_input: Option<RlHookFunc>,
@@ -90,9 +238,14 @@ impl HookState {
     const fn new() -> Self {
         Self {
             enabled: false,
+            highlight_enabled: true,
             ghost_drawn: false,
             suggestion: String::new(),
             out_buf: Vec::new(),
+            spans: Vec::new(),
+            cstr_buf: Vec::new(),
+            path_cache: None,
+            syms: DynamicSymbols::empty(),
             style: String::new(),
             orig_redisplay: None,
             orig_pre_input: None,
@@ -130,6 +283,12 @@ fn load_style_from_env() -> String {
         return clean.to_owned();
     }
     DEFAULT_SGR_STYLE.to_owned()
+}
+
+fn load_highlight_from_env() -> bool {
+    std::env::var("BASH_AUTOSUGGEST_HIGHLIGHT")
+        .map(|val| parse_bool_env(&val))
+        .unwrap_or(true)
 }
 
 /// Write raw bytes to Readline's `rl_outstream` and flush immediately.
@@ -279,8 +438,9 @@ unsafe fn should_suggest() -> bool {
 /// 1. Clears previous ghost text before Readline paints (prevents residue on `←`,
 ///    Backspace, `Ctrl+R`, or non-matching keystrokes).
 /// 2. Calls the original `rl_redisplay`.
-/// 3. If cursor is at end-of-line in normal editing state, finds the newest history
-///    suffix and draws it in grey using reusable buffers (0 heap allocations).
+/// 3. In a single flicker-free write: optionally repaints `rl_line_buffer` with
+///    Bash syntax highlighting, and when at end-of-line appends the newest history
+///    suffix in grey ghost text.
 unsafe extern "C" fn custom_redisplay() {
     // SAFETY: Invoked directly by GNU Readline on Bash's main thread.
     unsafe {
@@ -293,69 +453,132 @@ unsafe extern "C" fn custom_redisplay() {
             rl_redisplay();
         }
 
-        if !should_suggest() {
+        if rl_done != 0 || (rl_readline_state & RL_STATE_SUPPRESS_MASK) != 0 || rl_end <= 0 {
             STATE.with(|cell| {
                 if let Ok(mut st) = cell.try_borrow_mut() {
                     st.suggestion.clear();
+                    st.ghost_drawn = false;
                 }
             });
             return;
         }
+
+        let can_suggest = should_suggest();
+        let point = rl_point.max(0) as usize;
 
         let mut rows: c_int = 0;
         let mut cols: c_int = 0;
         rl_get_screen_size(&mut rows, &mut cols);
         let screen_cols = cols.max(0) as usize;
 
-        let drawn = with_current_line(|prefix| {
-            let avail_cols = with_display_prompt_bytes(|prompt_bytes| {
-                remaining_line_columns(prompt_bytes, prefix, screen_cols)
-            });
+        let handled = with_current_line(|line| {
+            with_display_prompt_bytes(|prompt_bytes| {
+                STATE.with(|cell| {
+                    let Ok(mut st) = cell.try_borrow_mut() else {
+                        return;
+                    };
 
-            STATE.with(|cell| {
-                let Ok(mut st) = cell.try_borrow_mut() else {
-                    return;
-                };
-                if !search_bash_history_into(prefix, &mut st.suggestion) {
-                    st.ghost_drawn = false;
-                    return;
-                }
+                    let display_len = if can_suggest {
+                        let avail_cols = remaining_line_columns(prompt_bytes, line, screen_cols);
+                        if search_bash_history_into(line, &mut st.suggestion) {
+                            truncate_to_columns(&st.suggestion, avail_cols).len()
+                        } else {
+                            0
+                        }
+                    } else {
+                        st.suggestion.clear();
+                        0
+                    };
 
-                let display_len = truncate_to_columns(&st.suggestion, avail_cols).len();
-                if display_len == 0 {
-                    st.ghost_drawn = false;
-                    return;
-                }
+                    let repaint_plan = if st.highlight_enabled
+                        && line.len() <= MAX_HIGHLIGHT_LEN
+                        && !st.syms.is_mark_active()
+                        && !st.syms.is_horizontal_scroll()
+                    {
+                        compute_repaint_plan(prompt_bytes, line, point, screen_cols)
+                    } else {
+                        None
+                    };
 
-                let HookState {
-                    suggestion,
-                    out_buf,
-                    style,
-                    ghost_drawn,
-                    ..
-                } = &mut *st;
-                let style_bytes = if style.is_empty() {
-                    DEFAULT_SGR_STYLE.as_bytes()
-                } else {
-                    style.as_bytes()
-                };
+                    if let Some(plan) = repaint_plan {
+                        let HookState {
+                            syms,
+                            path_cache,
+                            cstr_buf,
+                            spans,
+                            suggestion,
+                            out_buf,
+                            style,
+                            ghost_drawn,
+                            ..
+                        } = &mut *st;
+                        let cache = path_cache.get_or_insert_with(PathExecCache::new);
+                        let mut resolver = BashResolver {
+                            syms: *syms,
+                            path_cache: cache,
+                            cstr_buf,
+                        };
+                        highlight_line(line, &mut resolver, spans);
 
-                out_buf.clear();
-                out_buf.extend_from_slice(b"\x1b[K\x1b7\x1b[");
-                out_buf.extend_from_slice(style_bytes);
-                out_buf.push(b'm');
-                out_buf.extend_from_slice(&suggestion.as_bytes()[..display_len]);
-                out_buf.extend_from_slice(b"\x1b[0m\x1b8");
-                *ghost_drawn = true;
+                        let style_bytes = if style.is_empty() {
+                            DEFAULT_SGR_STYLE.as_bytes()
+                        } else {
+                            style.as_bytes()
+                        };
 
-                write_rl_out(out_buf);
+                        out_buf.clear();
+                        out_buf.extend_from_slice(b"\x1b7");
+                        emit_move_to_line_start(plan, out_buf);
+                        render_highlighted_into(line, spans, out_buf);
+
+                        if display_len > 0 {
+                            out_buf.extend_from_slice(b"\x1b[K\x1b[");
+                            out_buf.extend_from_slice(style_bytes);
+                            out_buf.push(b'm');
+                            out_buf.extend_from_slice(&suggestion.as_bytes()[..display_len]);
+                            out_buf.extend_from_slice(b"\x1b[0m\x1b8");
+                            *ghost_drawn = true;
+                        } else {
+                            out_buf.extend_from_slice(b"\x1b8");
+                            *ghost_drawn = false;
+                        }
+
+                        write_rl_out(out_buf);
+                    } else if display_len > 0 {
+                        let HookState {
+                            suggestion,
+                            out_buf,
+                            style,
+                            ghost_drawn,
+                            ..
+                        } = &mut *st;
+                        let style_bytes = if style.is_empty() {
+                            DEFAULT_SGR_STYLE.as_bytes()
+                        } else {
+                            style.as_bytes()
+                        };
+
+                        out_buf.clear();
+                        out_buf.extend_from_slice(b"\x1b[K\x1b7\x1b[");
+                        out_buf.extend_from_slice(style_bytes);
+                        out_buf.push(b'm');
+                        out_buf.extend_from_slice(&suggestion.as_bytes()[..display_len]);
+                        out_buf.extend_from_slice(b"\x1b[0m\x1b8");
+                        *ghost_drawn = true;
+
+                        write_rl_out(out_buf);
+                    } else {
+                        st.ghost_drawn = false;
+                    }
+                });
             });
         });
 
-        if drawn.is_none() {
+        if handled.is_none() {
             STATE.with(|cell| {
                 if let Ok(mut st) = cell.try_borrow_mut() {
                     st.suggestion.clear();
+                    st.ghost_drawn = false;
                 }
             });
         }
@@ -370,6 +593,11 @@ unsafe extern "C" fn custom_pre_input_hook() -> c_int {
         };
         st.ghost_drawn = false;
         st.suggestion.clear();
+        if st.highlight_enabled {
+            let cache = st.path_cache.get_or_insert_with(PathExecCache::new);
+            cache.invalidate_prompt_cache();
+            cache.refresh_if_needed();
+        }
         st.orig_pre_input
     });
 
@@ -651,6 +879,13 @@ pub fn enable() {
             return;
         };
         st.style = load_style_from_env();
+        st.highlight_enabled = load_highlight_from_env();
+
+        if st.highlight_enabled {
+            let cache = st.path_cache.get_or_insert_with(PathExecCache::new);
+            cache.refresh_if_needed();
+        }
+
         if st.enabled {
             return;
         }
@@ -659,12 +894,20 @@ pub fn enable() {
         if st.suggestion.capacity() < 256 {
             st.suggestion.reserve(256);
         }
-        if st.out_buf.capacity() < 320 {
-            st.out_buf.reserve(320);
+        if st.out_buf.capacity() < 512 {
+            st.out_buf.reserve(512);
+        }
+        if st.spans.capacity() < 64 {
+            st.spans.reserve(64);
+        }
+        if st.cstr_buf.capacity() < 64 {
+            st.cstr_buf.reserve(64);
         }
 
         // SAFETY: Called from Bash's builtin dispatcher on Bash's main thread.
         unsafe {
+            st.syms = DynamicSymbols::resolve();
+
             let orig_r = match rl_redisplay_function {
                 Some(f) if std::ptr::fn_addr_eq(f, custom_redisplay as RlVoidFunc) => {
                     Some(rl_redisplay as RlVoidFunc)
@@ -754,19 +997,34 @@ pub fn disable() {
     });
 }
 
+/// Toggle real-time Bash syntax highlighting at runtime.
+pub fn set_highlight(enabled: bool) {
+    STATE.with(|cell| {
+        let Ok(mut st) = cell.try_borrow_mut() else {
+            return;
+        };
+        st.highlight_enabled = enabled;
+        if enabled {
+            let cache = st.path_cache.get_or_insert_with(PathExecCache::new);
+            cache.refresh_if_needed();
+        }
+    });
+}
+
 /// Return a human-readable status summary.
 pub fn status() -> String {
-    let (enabled, style) = STATE.with(|cell| {
+    let (enabled, style, highlight) = STATE.with(|cell| {
         cell.try_borrow()
-            .map(|st| (st.enabled, st.style_str().to_owned()))
-            .unwrap_or_else(|_| (false, DEFAULT_SGR_STYLE.to_owned()))
+            .map(|st| (st.enabled, st.style_str().to_owned(), st.highlight_enabled))
+            .unwrap_or_else(|_| (false, DEFAULT_SGR_STYLE.to_owned(), true))
     });
     // SAFETY: Reading `history_length` on Bash's main thread.
     let hist_len = unsafe { history_length };
     format!(
-        "bash_autosuggest: {} (style=\"{}\", history_entries={})",
+        "bash_autosuggest: {} (style=\"{}\", highlight={}, history_entries={})",
         if enabled { "enabled" } else { "disabled" },
         style,
+        if highlight { "on" } else { "off" },
         hist_len
     )
 }

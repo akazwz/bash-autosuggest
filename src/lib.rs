@@ -1,4 +1,4 @@
-//! `bash-autosuggest`: Native GNU Readline history autosuggestions for Bash.
+//! `bash-autosuggest`: Native GNU Readline history autosuggestions & real-time syntax highlighting for Bash.
 //!
 //! Load inside an interactive Bash session via:
 //! ```bash
@@ -7,6 +7,8 @@
 //! ```
 
 pub mod ffi;
+#[forbid(unsafe_code)]
+pub mod highlight;
 pub mod hook;
 #[forbid(unsafe_code)]
 pub mod suggest;
@@ -18,11 +20,10 @@ use std::ptr;
 use crate::ffi::{BUILTIN_ENABLED, BashBuiltin, EXECUTION_FAILURE, EXECUTION_SUCCESS, WordList};
 
 const BUILTIN_NAME: &CStr = c"bash_autosuggest";
-const SHORT_DOC: &CStr = c"bash_autosuggest [enable|disable|status]";
+const SHORT_DOC: &CStr = c"bash_autosuggest [enable|disable|status|highlight [on|off]]";
 const DOC_LINE_1: &CStr =
-    c"Native GNU Readline history autosuggestions for Bash (ghost text + Right Arrow accept).";
-const DOC_LINE_2: &CStr =
-    c"Subcommands: enable (default), disable, status. Configure color with BASH_AUTOSUGGEST_STYLE.";
+    c"Native GNU Readline history autosuggestions & syntax highlighting for Bash.";
+const DOC_LINE_2: &CStr = c"Subcommands: enable (default), disable, status, highlight [on|off]. Env: BASH_AUTOSUGGEST_STYLE, BASH_AUTOSUGGEST_HIGHLIGHT.";
 
 struct SyncDocArray([*const c_char; 3]);
 
@@ -64,12 +65,12 @@ pub extern "C" fn bash_autosuggest_builtin_unload(_name: *mut c_char) {
     hook::disable();
 }
 
-/// Read the first word argument from a non-null Bash `WordList` node.
+/// Read the word string from a non-null Bash `WordList` node.
 ///
 /// # Safety
 /// `list` must reference a valid Bash `WordList` whose `word` string remains valid
 /// for the lifetime of the borrow.
-unsafe fn first_arg(list: &WordList) -> Option<&str> {
+unsafe fn node_word(list: &WordList) -> Option<&str> {
     // SAFETY: Caller guarantees `list` and its nested pointers are valid for the borrow.
     unsafe {
         let word_desc = list.word;
@@ -84,7 +85,7 @@ unsafe fn first_arg(list: &WordList) -> Option<&str> {
     }
 }
 
-/// Main builtin entrypoint: `bash_autosuggest [enable|disable|status]`.
+/// Main builtin entrypoint: `bash_autosuggest [enable|disable|status|highlight [on|off]]`.
 ///
 /// # Safety
 /// Must only be invoked by Bash's builtin dispatcher with either a null pointer
@@ -92,8 +93,17 @@ unsafe fn first_arg(list: &WordList) -> Option<&str> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bash_autosuggest_builtin(list: *mut WordList) -> c_int {
     // SAFETY: `list` validity is upheld by the caller (Bash builtin dispatcher).
-    let subcmd = unsafe { list.as_ref().and_then(|node| first_arg(node)) }.unwrap_or("enable");
-    match subcmd {
+    let (subcmd, arg2) = unsafe {
+        match list.as_ref() {
+            Some(node) => {
+                let first = node_word(node);
+                let second = node.next.as_ref().and_then(|next| node_word(next));
+                (first, second)
+            }
+            None => (None, None),
+        }
+    };
+    match subcmd.unwrap_or("enable") {
         "enable" | "on" => {
             hook::enable();
             EXECUTION_SUCCESS
@@ -102,13 +112,29 @@ pub unsafe extern "C" fn bash_autosuggest_builtin(list: *mut WordList) -> c_int 
             hook::disable();
             EXECUTION_SUCCESS
         }
+        "highlight" => match arg2.unwrap_or("on") {
+            "on" | "enable" | "1" | "true" => {
+                hook::set_highlight(true);
+                EXECUTION_SUCCESS
+            }
+            "off" | "disable" | "0" | "false" => {
+                hook::set_highlight(false);
+                EXECUTION_SUCCESS
+            }
+            other => {
+                eprintln!(
+                    "bash_autosuggest: unknown highlight setting '{other}' (expected on|off)"
+                );
+                EXECUTION_FAILURE
+            }
+        },
         "status" => {
             println!("{}", hook::status());
             EXECUTION_SUCCESS
         }
         other => {
             eprintln!(
-                "bash_autosuggest: unknown subcommand '{other}' (expected enable|disable|status)"
+                "bash_autosuggest: unknown subcommand '{other}' (expected enable|disable|status|highlight)"
             );
             EXECUTION_FAILURE
         }

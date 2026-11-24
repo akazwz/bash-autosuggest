@@ -143,6 +143,22 @@ pub fn char_display_width(ch: char) -> usize {
     1
 }
 
+/// Compute the display column (`0..screen_cols`) at the end of the final line of `prompt_bytes`.
+pub fn measure_prompt_last_line_col(prompt_bytes: &[u8], screen_cols: usize) -> usize {
+    if screen_cols == 0 {
+        return 0;
+    }
+
+    let last_prompt_line = match prompt_bytes.iter().rposition(|&b| b == b'\n') {
+        Some(pos) => &prompt_bytes[pos + 1..],
+        None => prompt_bytes,
+    };
+
+    let mut col = 0usize;
+    measure_prompt_line(last_prompt_line, screen_cols, &mut col);
+    if col >= screen_cols { 0 } else { col }
+}
+
 /// Compute the number of remaining terminal columns available for ghost text on the
 /// current display row, leaving a 1-column right margin to prevent auto-wrap.
 ///
