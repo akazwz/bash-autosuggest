@@ -1,0 +1,45 @@
+[tools]
+rust = { version = "1.100.0", components = ["rustfmt", "clippy"] }
+
+[tasks.fmt]
+description = "Format Rust files (writes files)"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust formatting without modifying files"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Run Clippy checks; warnings fail the task"
+env = { CARGO_BUILD_WARNINGS = "deny" }
+run = "cargo clippy --all-targets"
+
+[tasks.test]
+description = "Run Rust unit tests"
+run = "cargo test"
+
+[tasks.build]
+description = "Build release shared library for Bash"
+run = "cargo build --release"
+
+[tasks.e2e]
+description = "Run live Bash PTY end-to-end tests against the release .so"
+depends = ["build"]
+run = "python3 tests/pty_e2e.py target/release/libbash_autosuggest.so"
+
+[tasks.install]
+description = "Build and install libbash_autosuggest.so to ~/.local/lib"
+depends = ["build"]
+run = """
+mkdir -p "$HOME/.local/lib"
+install -m 755 target/release/libbash_autosuggest.so "$HOME/.local/lib/bash_autosuggest.so"
+echo "Installed to $HOME/.local/lib/bash_autosuggest.so"
+"""
+
+[tasks.uninstall]
+description = "Remove installed bash_autosuggest.so from ~/.local/lib"
+run = 'rm -f "$HOME/.local/lib/bash_autosuggest.so"'
+
+[tasks.check]
+description = "Check formatting, Clippy, unit tests, and PTY e2e tests"
+depends = ["fmt-check", "lint", "test", "e2e"]
