@@ -55,7 +55,9 @@ remove_bashrc_block() {
             $0 == end { skip = 0; next }
             !skip { print }
         ' "$BASHRC" > "$tmp_rc"
-        mv -f "$tmp_rc" "$BASHRC"
+        # Preserve symlinks and file permissions by writing back into existing file.
+        cat "$tmp_rc" > "$BASHRC"
+        rm -f "$tmp_rc"
         printf 'Removed managed bash-autosuggest block from %s\n' "$BASHRC"
     elif grep -q 'bash_autosuggest' "$BASHRC"; then
         printf 'Note: found manual bash_autosuggest lines in %s; please remove them manually.\n' "$BASHRC"
@@ -108,7 +110,14 @@ else
 fi
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+STAGE_FILE=""
+cleanup_tmp() {
+    rm -rf "$TMP_DIR"
+    if [ -n "$STAGE_FILE" ]; then
+        rm -f "$STAGE_FILE"
+    fi
+}
+trap cleanup_tmp EXIT INT TERM
 
 download() {
     url="$1"
@@ -126,24 +135,36 @@ download() {
 printf 'Downloading %s...\n' "$ASSET"
 download "${BASE_URL}/${ASSET}" "${TMP_DIR}/${ASSET}"
 
-if download "${BASE_URL}/SHA256SUMS" "${TMP_DIR}/SHA256SUMS" 2>/dev/null; then
-    if command -v sha256sum >/dev/null 2>&1; then
-        EXPECTED="$(awk -v f="$ASSET" '$2 == f || $2 == ("*" f) { print $1; exit }' "${TMP_DIR}/SHA256SUMS")"
-        if [ -n "$EXPECTED" ]; then
-            ACTUAL="$(sha256sum "${TMP_DIR}/${ASSET}" | awk '{ print $1 }')"
-            if [ "$EXPECTED" != "$ACTUAL" ]; then
-                printf 'bash-autosuggest: SHA256 mismatch!\n  expected: %s\n  actual:   %s\n' "$EXPECTED" "$ACTUAL" >&2
-                exit 1
-            fi
-            printf 'SHA256 verified.\n'
-        fi
+if [ "${SKIP_SHA256:-0}" != "1" ]; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        printf 'bash-autosuggest: sha256sum is required to verify download (set SKIP_SHA256=1 to bypass)\n' >&2
+        exit 1
     fi
+    if ! download "${BASE_URL}/SHA256SUMS" "${TMP_DIR}/SHA256SUMS"; then
+        printf 'bash-autosuggest: failed to download SHA256SUMS (set SKIP_SHA256=1 to bypass)\n' >&2
+        exit 1
+    fi
+    EXPECTED="$(awk -v f="$ASSET" '$2 == f || $2 == ("*" f) { print $1; exit }' "${TMP_DIR}/SHA256SUMS")"
+    if [ -z "$EXPECTED" ]; then
+        printf 'bash-autosuggest: %s not found in SHA256SUMS\n' "$ASSET" >&2
+        exit 1
+    fi
+    ACTUAL="$(sha256sum "${TMP_DIR}/${ASSET}" | awk '{ print $1 }')"
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+        printf 'bash-autosuggest: SHA256 mismatch!\n  expected: %s\n  actual:   %s\n' "$EXPECTED" "$ACTUAL" >&2
+        exit 1
+    fi
+    printf 'SHA256 verified.\n'
 fi
 
 mkdir -p "$INSTALL_DIR"
-chmod 755 "${TMP_DIR}/${ASSET}"
-# Atomic rename so running Bash processes with the old .so mapped are never disturbed.
-mv -f "${TMP_DIR}/${ASSET}" "$TARGET_FILE"
+# Stage in the same directory so `mv -f` is guaranteed to be a same-filesystem atomic rename(2),
+# ensuring already-running Bash processes with the old .so mapped never receive SIGBUS.
+STAGE_FILE="$(mktemp "$INSTALL_DIR/.bash_autosuggest.so.XXXXXX")"
+cp "${TMP_DIR}/${ASSET}" "$STAGE_FILE"
+chmod 755 "$STAGE_FILE"
+mv -f "$STAGE_FILE" "$TARGET_FILE"
+STAGE_FILE=""
 
 printf 'Installed to %s\n' "$TARGET_FILE"
 

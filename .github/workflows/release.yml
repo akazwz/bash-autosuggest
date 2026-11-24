@@ -47,7 +47,11 @@ jobs:
 
       - name: Package raw .so and .deb
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "${GITHUB_REF_NAME}" =~ ^v?[0-9] ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0~${GITHUB_REF_NAME}.${GITHUB_RUN_NUMBER}"
+          fi
           mkdir -p dist
           cp target/release/libbash_autosuggest.so "dist/bash_autosuggest-linux-${{ matrix.arch }}.so"
 

@@ -2,21 +2,23 @@
 //!
 //! All Bash / Readline callbacks execute strictly on Bash's main thread, so state lives
 //! in a single-thread `RefCell` with pre-allocated reusable buffers (zero heap allocation
-//! on the per-keystroke hot path).
+//! on the per-keystroke hot path). All callbacks use fallible `try_borrow` / `try_borrow_mut`
+//! so unexpected signal-handler re-entry can never panic or abort the host Bash process.
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use crate::ffi::{
-    _rl_last_c_pos, ISFUNC, Keymap, RL_STATE_SUPPRESS_MASK, RlCommandFunc, RlHookFunc, RlVoidFunc,
+    ISFUNC, Keymap, RL_STATE_SUPPRESS_MASK, RlCommandFunc, RlHookFunc, RlVoidFunc,
     emacs_standard_keymap, fflush, fwrite, history_length, history_list, rl_bind_keyseq_in_map,
-    rl_done, rl_end, rl_end_of_line, rl_forward_char, rl_forward_word, rl_function_of_keyseq_len,
-    rl_get_screen_size, rl_insert_text, rl_line_buffer, rl_newline, rl_outstream, rl_point,
-    rl_pre_input_hook, rl_readline_state, rl_redisplay, rl_redisplay_function, vi_insertion_keymap,
+    rl_display_prompt, rl_done, rl_end, rl_end_of_line, rl_forward_char, rl_forward_word,
+    rl_function_of_keyseq_len, rl_get_keymap, rl_get_screen_size, rl_insert_text, rl_line_buffer,
+    rl_newline, rl_outstream, rl_point, rl_pre_input_hook, rl_prompt, rl_readline_state,
+    rl_redisplay, rl_redisplay_function, vi_insertion_keymap, vi_movement_keymap,
 };
 use crate::suggest::{
-    find_suggestion_bytes, is_supported_term, next_word_prefix, sanitize_sgr_style,
-    truncate_to_columns,
+    find_suggestion_bytes, is_supported_term, next_word_prefix, remaining_line_columns,
+    sanitize_sgr_style, truncate_to_columns,
 };
 
 const DEFAULT_SGR_STYLE: &str = "38;5;242";
@@ -29,6 +31,48 @@ struct SavedBinding {
     original: Option<RlCommandFunc>,
 }
 
+/// Original `ISFUNC` bindings captured per keymap so fallback calls preserve user config.
+#[derive(Clone, Copy)]
+struct KeymapFallbacks {
+    right_arrow: Option<RlCommandFunc>,
+    ctrl_f: Option<RlCommandFunc>,
+    end_of_line: Option<RlCommandFunc>,
+    alt_right: Option<RlCommandFunc>,
+    alt_f: Option<RlCommandFunc>,
+    newline: Option<RlCommandFunc>,
+    tab: Option<RlCommandFunc>,
+}
+
+impl KeymapFallbacks {
+    const fn empty() -> Self {
+        Self {
+            right_arrow: None,
+            ctrl_f: None,
+            end_of_line: None,
+            alt_right: None,
+            alt_f: None,
+            newline: None,
+            tab: None,
+        }
+    }
+}
+
+enum BindingLookup {
+    Unbound,
+    Func(RlCommandFunc),
+    /// Existing macro (`ISMACR`) or sub-keymap (`ISKMAP`) that we must not clobber.
+    Other,
+}
+
+impl BindingLookup {
+    fn as_func(&self) -> Option<RlCommandFunc> {
+        match *self {
+            Self::Func(f) => Some(f),
+            Self::Unbound | Self::Other => None,
+        }
+    }
+}
+
 struct HookState {
     enabled: bool,
     ghost_drawn: bool,
@@ -37,11 +81,8 @@ struct HookState {
     style: String,
     orig_redisplay: Option<RlVoidFunc>,
     orig_pre_input: Option<RlHookFunc>,
-    orig_forward_char: Option<RlCommandFunc>,
-    orig_end_of_line: Option<RlCommandFunc>,
-    orig_forward_word: Option<RlCommandFunc>,
-    orig_newline: Option<RlCommandFunc>,
-    orig_tab: Option<RlCommandFunc>,
+    emacs_fallbacks: KeymapFallbacks,
+    vi_fallbacks: KeymapFallbacks,
     saved_bindings: Vec<SavedBinding>,
 }
 
@@ -55,11 +96,8 @@ impl HookState {
             style: String::new(),
             orig_redisplay: None,
             orig_pre_input: None,
-            orig_forward_char: None,
-            orig_end_of_line: None,
-            orig_forward_word: None,
-            orig_newline: None,
-            orig_tab: None,
+            emacs_fallbacks: KeymapFallbacks::empty(),
+            vi_fallbacks: KeymapFallbacks::empty(),
             saved_bindings: Vec::new(),
         }
     }
@@ -69,6 +107,14 @@ impl HookState {
             DEFAULT_SGR_STYLE
         } else {
             &self.style
+        }
+    }
+
+    fn fallbacks_for(&self, active_map: Keymap, vi_ins_map: Keymap) -> KeymapFallbacks {
+        if active_map == vi_ins_map {
+            self.vi_fallbacks
+        } else {
+            self.emacs_fallbacks
         }
     }
 }
@@ -111,7 +157,9 @@ unsafe fn write_rl_out(bytes: &[u8]) {
 /// Must be called from Bash's main thread while Readline is initialized.
 unsafe fn clear_ghost_if_drawn() {
     let need_clear = STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
+        let Ok(mut st) = cell.try_borrow_mut() else {
+            return false;
+        };
         if st.ghost_drawn {
             st.ghost_drawn = false;
             true
@@ -165,23 +213,45 @@ unsafe fn search_bash_history_into(prefix: &str, dest: &mut String) -> bool {
     }
 }
 
-/// Read Readline's current line buffer (`0..rl_end`) as UTF-8.
+/// Borrow Readline's current line buffer (`0..rl_end`) as UTF-8 within a synchronous callback.
 ///
 /// # Safety
-/// Returned slice borrows Readline's `rl_line_buffer` and must not outlive the current
-/// synchronous Readline callback.
-unsafe fn current_line_str() -> Option<&'static str> {
+/// Must be called from Bash's main thread during a Readline redisplay or keybinding callback.
+unsafe fn with_current_line<R>(f: impl FnOnce(&str) -> R) -> Option<R> {
     // SAFETY: `rl_line_buffer` points to a valid buffer of at least `rl_end` bytes during
-    // any Readline redisplay or keybinding callback.
-    unsafe {
+    // any synchronous Readline callback and is not mutated while `f` runs.
+    let line = unsafe {
         let buf = rl_line_buffer;
         let end = rl_end;
         if buf.is_null() || end <= 0 {
             return None;
         }
         let bytes = std::slice::from_raw_parts(buf.cast::<u8>(), end as usize);
-        std::str::from_utf8(bytes).ok()
-    }
+        std::str::from_utf8(bytes).ok()?
+    };
+    Some(f(line))
+}
+
+/// Borrow Readline's current display prompt bytes (`rl_display_prompt`, falling back to `rl_prompt`).
+///
+/// # Safety
+/// Must be called from Bash's main thread during a synchronous Readline callback.
+unsafe fn with_display_prompt_bytes<R>(f: impl FnOnce(&[u8]) -> R) -> R {
+    // SAFETY: `rl_display_prompt` / `rl_prompt` are NUL-terminated C strings owned by
+    // GNU Readline on Bash's main thread for the duration of this synchronous callback.
+    let bytes = unsafe {
+        let ptr = if !rl_display_prompt.is_null() {
+            rl_display_prompt
+        } else {
+            rl_prompt
+        };
+        if ptr.is_null() {
+            &[]
+        } else {
+            CStr::from_ptr(ptr).to_bytes()
+        }
+    };
+    f(bytes)
 }
 
 /// Check whether Readline is in normal end-of-line editing state suitable for ghost text.
@@ -195,6 +265,10 @@ unsafe fn should_suggest() -> bool {
             return false;
         }
         if (rl_readline_state & RL_STATE_SUPPRESS_MASK) != 0 {
+            return false;
+        }
+        let vi_cmd_map: Keymap = &raw mut vi_movement_keymap;
+        if rl_get_keymap() == vi_cmd_map {
             return false;
         }
         rl_end > 0 && rl_point == rl_end
@@ -212,7 +286,7 @@ unsafe extern "C" fn custom_redisplay() {
     unsafe {
         clear_ghost_if_drawn();
 
-        let orig = STATE.with(|cell| cell.borrow().orig_redisplay);
+        let orig = STATE.with(|cell| cell.try_borrow().ok().and_then(|st| st.orig_redisplay));
         if let Some(f) = orig {
             f();
         } else {
@@ -220,69 +294,80 @@ unsafe extern "C" fn custom_redisplay() {
         }
 
         if !should_suggest() {
-            STATE.with(|cell| cell.borrow_mut().suggestion.clear());
+            STATE.with(|cell| {
+                if let Ok(mut st) = cell.try_borrow_mut() {
+                    st.suggestion.clear();
+                }
+            });
             return;
         }
-
-        let Some(prefix) = current_line_str() else {
-            STATE.with(|cell| cell.borrow_mut().suggestion.clear());
-            return;
-        };
 
         let mut rows: c_int = 0;
         let mut cols: c_int = 0;
         rl_get_screen_size(&mut rows, &mut cols);
-        let cur_col = _rl_last_c_pos.max(0);
-        // Leave 1 column margin so the terminal never triggers auto-wrap at the right edge.
-        let avail_cols = if cols > cur_col + 1 {
-            (cols - cur_col - 1) as usize
-        } else {
-            0
-        };
+        let screen_cols = cols.max(0) as usize;
 
-        STATE.with(|cell| {
-            let mut st = cell.borrow_mut();
-            if !search_bash_history_into(prefix, &mut st.suggestion) {
-                st.ghost_drawn = false;
-                return;
-            }
+        let drawn = with_current_line(|prefix| {
+            let avail_cols = with_display_prompt_bytes(|prompt_bytes| {
+                remaining_line_columns(prompt_bytes, prefix, screen_cols)
+            });
 
-            let display_len = truncate_to_columns(&st.suggestion, avail_cols).len();
-            if display_len == 0 {
-                st.ghost_drawn = false;
-                return;
-            }
+            STATE.with(|cell| {
+                let Ok(mut st) = cell.try_borrow_mut() else {
+                    return;
+                };
+                if !search_bash_history_into(prefix, &mut st.suggestion) {
+                    st.ghost_drawn = false;
+                    return;
+                }
 
-            let HookState {
-                suggestion,
-                out_buf,
-                style,
-                ghost_drawn,
-                ..
-            } = &mut *st;
-            let style_bytes = if style.is_empty() {
-                DEFAULT_SGR_STYLE.as_bytes()
-            } else {
-                style.as_bytes()
-            };
+                let display_len = truncate_to_columns(&st.suggestion, avail_cols).len();
+                if display_len == 0 {
+                    st.ghost_drawn = false;
+                    return;
+                }
 
-            out_buf.clear();
-            out_buf.extend_from_slice(b"\x1b[K\x1b7\x1b[");
-            out_buf.extend_from_slice(style_bytes);
-            out_buf.push(b'm');
-            out_buf.extend_from_slice(&suggestion.as_bytes()[..display_len]);
-            out_buf.extend_from_slice(b"\x1b[0m\x1b8");
-            *ghost_drawn = true;
+                let HookState {
+                    suggestion,
+                    out_buf,
+                    style,
+                    ghost_drawn,
+                    ..
+                } = &mut *st;
+                let style_bytes = if style.is_empty() {
+                    DEFAULT_SGR_STYLE.as_bytes()
+                } else {
+                    style.as_bytes()
+                };
 
-            write_rl_out(out_buf);
+                out_buf.clear();
+                out_buf.extend_from_slice(b"\x1b[K\x1b7\x1b[");
+                out_buf.extend_from_slice(style_bytes);
+                out_buf.push(b'm');
+                out_buf.extend_from_slice(&suggestion.as_bytes()[..display_len]);
+                out_buf.extend_from_slice(b"\x1b[0m\x1b8");
+                *ghost_drawn = true;
+
+                write_rl_out(out_buf);
+            });
         });
+
+        if drawn.is_none() {
+            STATE.with(|cell| {
+                if let Ok(mut st) = cell.try_borrow_mut() {
+                    st.suggestion.clear();
+                }
+            });
+        }
     }
 }
 
 /// Reset per-prompt state cleanly at the start of every new Readline input cycle.
 unsafe extern "C" fn custom_pre_input_hook() -> c_int {
     let orig = STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
+        let Ok(mut st) = cell.try_borrow_mut() else {
+            return None;
+        };
         st.ghost_drawn = false;
         st.suggestion.clear();
         st.orig_pre_input
@@ -305,7 +390,9 @@ unsafe fn try_accept_full() -> bool {
             return false;
         }
         let text_opt = STATE.with(|cell| {
-            let mut st = cell.borrow_mut();
+            let Ok(mut st) = cell.try_borrow_mut() else {
+                return None;
+            };
             if st.suggestion.is_empty() {
                 None
             } else {
@@ -323,14 +410,75 @@ unsafe fn try_accept_full() -> bool {
     }
 }
 
-/// Accept full suggestion when at end-of-line (`→` / `Ctrl+F`), otherwise forward-char.
-unsafe extern "C" fn accept_or_forward_char(count: c_int, key: c_int) -> c_int {
+/// Insert the next word of the active suggestion and immediately advance `st.suggestion`
+/// so rapid repeated word accepts never duplicate text even if Readline defers redisplay.
+unsafe fn try_accept_word() -> bool {
+    // SAFETY: Called from Readline keybinding callbacks on Bash's main thread.
+    unsafe {
+        if !should_suggest() {
+            return false;
+        }
+        let chunk_opt = STATE.with(|cell| {
+            let Ok(mut st) = cell.try_borrow_mut() else {
+                return None;
+            };
+            let word_len = next_word_prefix(&st.suggestion).len();
+            if word_len == 0 {
+                return None;
+            }
+            let cstr = CString::new(&st.suggestion[..word_len]).ok();
+            if cstr.is_some() {
+                st.suggestion.drain(..word_len);
+            }
+            cstr
+        });
+        if let Some(cstr) = chunk_opt {
+            clear_ghost_if_drawn();
+            rl_insert_text(cstr.as_ptr());
+            return true;
+        }
+        false
+    }
+}
+
+unsafe fn current_fallbacks() -> KeymapFallbacks {
+    // SAFETY: Querying Readline keymap globals on Bash's main thread.
+    let (active_map, vi_ins_map) = unsafe { (rl_get_keymap(), &raw mut vi_insertion_keymap) };
+    STATE.with(|cell| {
+        cell.try_borrow()
+            .map(|st| st.fallbacks_for(active_map, vi_ins_map))
+            .unwrap_or_else(|_| KeymapFallbacks::empty())
+    })
+}
+
+/// Accept full suggestion when at end-of-line (`→`), otherwise original Right Arrow binding.
+unsafe extern "C" fn accept_or_right_arrow(count: c_int, key: c_int) -> c_int {
     // SAFETY: Invoked by GNU Readline on Bash's main thread.
     unsafe {
         if try_accept_full() {
             return 0;
         }
-        let orig = STATE.with(|cell| cell.borrow().orig_forward_char);
+        let orig = current_fallbacks().right_arrow;
+        if let Some(f) = orig {
+            f(count, key)
+        } else {
+            rl_forward_char(count, key)
+        }
+    }
+}
+
+/// Accept full suggestion when at end-of-line (`Ctrl+F`), otherwise original `Ctrl+F` binding.
+unsafe extern "C" fn accept_or_ctrl_f(count: c_int, key: c_int) -> c_int {
+    // SAFETY: Invoked by GNU Readline on Bash's main thread.
+    unsafe {
+        if try_accept_full() {
+            return 0;
+        }
+        let orig = STATE.with(|cell| {
+            cell.try_borrow()
+                .ok()
+                .and_then(|st| st.emacs_fallbacks.ctrl_f)
+        });
         if let Some(f) = orig {
             f(count, key)
         } else {
@@ -346,7 +494,7 @@ unsafe extern "C" fn accept_or_end_of_line(count: c_int, key: c_int) -> c_int {
         if try_accept_full() {
             return 0;
         }
-        let orig = STATE.with(|cell| cell.borrow().orig_end_of_line);
+        let orig = current_fallbacks().end_of_line;
         if let Some(f) = orig {
             f(count, key)
         } else {
@@ -355,28 +503,34 @@ unsafe extern "C" fn accept_or_end_of_line(count: c_int, key: c_int) -> c_int {
     }
 }
 
-/// Accept one word of the suggestion when at end-of-line (`Alt+→` / `Alt+f`), otherwise forward-word.
-unsafe extern "C" fn accept_word_or_forward_word(count: c_int, key: c_int) -> c_int {
+/// Accept one word of the suggestion when at end-of-line (`Alt+→`), otherwise forward-word.
+unsafe extern "C" fn accept_word_or_alt_right(count: c_int, key: c_int) -> c_int {
     // SAFETY: Invoked by GNU Readline on Bash's main thread.
     unsafe {
-        if should_suggest() {
-            let chunk_opt = STATE.with(|cell| {
-                let st = cell.borrow();
-                let word = next_word_prefix(&st.suggestion);
-                if word.is_empty() {
-                    None
-                } else {
-                    CString::new(word).ok()
-                }
-            });
-            if let Some(cstr) = chunk_opt {
-                clear_ghost_if_drawn();
-                rl_insert_text(cstr.as_ptr());
-                return 0;
-            }
+        if try_accept_word() {
+            return 0;
         }
+        let orig = current_fallbacks().alt_right;
+        if let Some(f) = orig {
+            f(count, key)
+        } else {
+            rl_forward_word(count, key)
+        }
+    }
+}
 
-        let orig = STATE.with(|cell| cell.borrow().orig_forward_word);
+/// Accept one word of the suggestion when at end-of-line (`Alt+f`), otherwise original `Alt+f`.
+unsafe extern "C" fn accept_word_or_alt_f(count: c_int, key: c_int) -> c_int {
+    // SAFETY: Invoked by GNU Readline on Bash's main thread.
+    unsafe {
+        if try_accept_word() {
+            return 0;
+        }
+        let orig = STATE.with(|cell| {
+            cell.try_borrow()
+                .ok()
+                .and_then(|st| st.emacs_fallbacks.alt_f)
+        });
         if let Some(f) = orig {
             f(count, key)
         } else {
@@ -390,9 +544,13 @@ unsafe extern "C" fn clear_and_newline(count: c_int, key: c_int) -> c_int {
     // SAFETY: Invoked by GNU Readline on Bash's main thread.
     unsafe {
         clear_ghost_if_drawn();
-        STATE.with(|cell| cell.borrow_mut().suggestion.clear());
+        STATE.with(|cell| {
+            if let Ok(mut st) = cell.try_borrow_mut() {
+                st.suggestion.clear();
+            }
+        });
 
-        let orig = STATE.with(|cell| cell.borrow().orig_newline);
+        let orig = current_fallbacks().newline;
         if let Some(f) = orig {
             f(count, key)
         } else {
@@ -406,20 +564,28 @@ unsafe extern "C" fn clear_and_tab(count: c_int, key: c_int) -> c_int {
     // SAFETY: Invoked by GNU Readline on Bash's main thread.
     unsafe {
         clear_ghost_if_drawn();
-        STATE.with(|cell| cell.borrow_mut().suggestion.clear());
+        STATE.with(|cell| {
+            if let Ok(mut st) = cell.try_borrow_mut() {
+                st.suggestion.clear();
+            }
+        });
 
-        let orig = STATE.with(|cell| cell.borrow().orig_tab);
+        let orig = current_fallbacks().tab;
         if let Some(f) = orig { f(count, key) } else { 0 }
     }
 }
 
-unsafe fn lookup_binding(keymap: Keymap, seq: &[u8]) -> Option<RlCommandFunc> {
+unsafe fn lookup_binding(keymap: Keymap, seq: &[u8]) -> BindingLookup {
     // SAFETY: `seq` is NUL-terminated static bytes; `keymap` is a valid Readline keymap.
     unsafe {
         let mut kind: c_int = -1;
         let len = seq.len().saturating_sub(1);
         let func = rl_function_of_keyseq_len(seq.as_ptr().cast::<c_char>(), len, keymap, &mut kind);
-        if kind == ISFUNC { func } else { None }
+        match func {
+            None => BindingLookup::Unbound,
+            Some(f) if kind == ISFUNC => BindingLookup::Func(f),
+            Some(_) => BindingLookup::Other,
+        }
     }
 }
 
@@ -431,13 +597,45 @@ unsafe fn bind_and_record(
 ) {
     // SAFETY: `seq` is NUL-terminated static bytes; `keymap` is a valid Readline keymap.
     unsafe {
-        let original = lookup_binding(keymap, seq);
+        let original = match lookup_binding(keymap, seq) {
+            BindingLookup::Unbound => None,
+            BindingLookup::Func(f) => Some(f),
+            // Never overwrite a user's custom macro (`ISMACR`) or prefix sub-keymap (`ISKMAP`).
+            BindingLookup::Other => return,
+        };
         st.saved_bindings.push(SavedBinding {
             keymap,
             seq,
             original,
         });
         rl_bind_keyseq_in_map(seq.as_ptr().cast::<c_char>(), Some(handler), keymap);
+    }
+}
+
+unsafe fn capture_fallbacks(keymap: Keymap) -> KeymapFallbacks {
+    // SAFETY: `keymap` is a valid Readline keymap on Bash's main thread.
+    unsafe {
+        KeymapFallbacks {
+            right_arrow: lookup_binding(keymap, b"\x1b[C\0")
+                .as_func()
+                .or(Some(rl_forward_char)),
+            ctrl_f: lookup_binding(keymap, b"\x06\0")
+                .as_func()
+                .or(Some(rl_forward_char)),
+            end_of_line: lookup_binding(keymap, b"\x1b[F\0")
+                .as_func()
+                .or(Some(rl_end_of_line)),
+            alt_right: lookup_binding(keymap, b"\x1b[1;3C\0")
+                .as_func()
+                .or(Some(rl_forward_word)),
+            alt_f: lookup_binding(keymap, b"\x1bf\0")
+                .as_func()
+                .or(Some(rl_forward_word)),
+            newline: lookup_binding(keymap, b"\r\0")
+                .as_func()
+                .or(Some(rl_newline)),
+            tab: lookup_binding(keymap, b"\t\0").as_func(),
+        }
     }
 }
 
@@ -449,7 +647,9 @@ pub fn enable() {
     }
 
     STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
+        let Ok(mut st) = cell.try_borrow_mut() else {
+            return;
+        };
         st.style = load_style_from_env();
         if st.enabled {
             return;
@@ -483,31 +683,38 @@ pub fn enable() {
             let emacs_map: Keymap = &raw mut emacs_standard_keymap;
             let vi_map: Keymap = &raw mut vi_insertion_keymap;
 
-            st.orig_forward_char = lookup_binding(emacs_map, b"\x1b[C\0").or(Some(rl_forward_char));
-            st.orig_end_of_line = lookup_binding(emacs_map, b"\x1b[F\0").or(Some(rl_end_of_line));
-            st.orig_forward_word =
-                lookup_binding(emacs_map, b"\x1b[1;3C\0").or(Some(rl_forward_word));
-            st.orig_newline = lookup_binding(emacs_map, b"\r\0").or(Some(rl_newline));
-            st.orig_tab = lookup_binding(emacs_map, b"\t\0");
+            st.emacs_fallbacks = capture_fallbacks(emacs_map);
+            st.vi_fallbacks = capture_fallbacks(vi_map);
 
-            for &map in &[emacs_map, vi_map] {
-                bind_and_record(&mut st, map, b"\x1b[C\0", accept_or_forward_char);
-                bind_and_record(&mut st, map, b"\x1bOC\0", accept_or_forward_char);
+            let emacs_has_tab = st.emacs_fallbacks.tab.is_some();
+            let vi_has_tab = st.vi_fallbacks.tab.is_some();
+
+            // Shared arrow / End / Enter / Tab bindings for both emacs and vi-insert keymaps.
+            for (map, has_tab) in [(emacs_map, emacs_has_tab), (vi_map, vi_has_tab)] {
+                bind_and_record(&mut st, map, b"\x1b[C\0", accept_or_right_arrow);
+                bind_and_record(&mut st, map, b"\x1bOC\0", accept_or_right_arrow);
                 bind_and_record(&mut st, map, b"\x1b[F\0", accept_or_end_of_line);
                 bind_and_record(&mut st, map, b"\x1bOF\0", accept_or_end_of_line);
-                bind_and_record(&mut st, map, b"\x1b[1;3C\0", accept_word_or_forward_word);
-                bind_and_record(&mut st, map, b"\x1b[3C\0", accept_word_or_forward_word);
-                bind_and_record(&mut st, map, b"\x1b\x1b[C\0", accept_word_or_forward_word);
+                bind_and_record(&mut st, map, b"\x1b[1;3C\0", accept_word_or_alt_right);
+                bind_and_record(&mut st, map, b"\x1b[3C\0", accept_word_or_alt_right);
                 bind_and_record(&mut st, map, b"\r\0", clear_and_newline);
                 bind_and_record(&mut st, map, b"\n\0", clear_and_newline);
-                if st.orig_tab.is_some() {
+                if has_tab {
                     bind_and_record(&mut st, map, b"\t\0", clear_and_tab);
                 }
             }
 
-            // Standard emacs full/word accept shortcuts (`Ctrl+F` and `Alt+f`).
-            bind_and_record(&mut st, emacs_map, b"\x06\0", accept_or_forward_char);
-            bind_and_record(&mut st, emacs_map, b"\x1bf\0", accept_word_or_forward_word);
+            // Emacs-only shortcuts (`Ctrl+F`, `Alt+f`, and double-ESC arrow `\e\e[C`).
+            // `\e\e[C` is intentionally excluded from `vi_insertion_keymap` so pressing ESC
+            // in Vi insert mode never stalls on an ESC-ESC sub-keymap.
+            bind_and_record(&mut st, emacs_map, b"\x06\0", accept_or_ctrl_f);
+            bind_and_record(&mut st, emacs_map, b"\x1bf\0", accept_word_or_alt_f);
+            bind_and_record(
+                &mut st,
+                emacs_map,
+                b"\x1b\x1b[C\0",
+                accept_word_or_alt_right,
+            );
         }
 
         st.enabled = true;
@@ -520,7 +727,9 @@ pub fn disable() {
     unsafe { clear_ghost_if_drawn() };
 
     STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
+        let Ok(mut st) = cell.try_borrow_mut() else {
+            return;
+        };
         if !st.enabled {
             return;
         }
@@ -548,8 +757,9 @@ pub fn disable() {
 /// Return a human-readable status summary.
 pub fn status() -> String {
     let (enabled, style) = STATE.with(|cell| {
-        let st = cell.borrow();
-        (st.enabled, st.style_str().to_owned())
+        cell.try_borrow()
+            .map(|st| (st.enabled, st.style_str().to_owned()))
+            .unwrap_or_else(|_| (false, DEFAULT_SGR_STYLE.to_owned()))
     });
     // SAFETY: Reading `history_length` on Bash's main thread.
     let hist_len = unsafe { history_length };

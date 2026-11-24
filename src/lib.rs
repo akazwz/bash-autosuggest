@@ -64,14 +64,15 @@ pub extern "C" fn bash_autosuggest_builtin_unload(_name: *mut c_char) {
     hook::disable();
 }
 
-unsafe fn first_arg(list: *mut WordList) -> Option<&'static str> {
-    // SAFETY: Caller guarantees `list` is null or a valid Bash `WordList` node whose strings
-    // live for the duration of the builtin call.
+/// Read the first word argument from a non-null Bash `WordList` node.
+///
+/// # Safety
+/// `list` must reference a valid Bash `WordList` whose `word` string remains valid
+/// for the lifetime of the borrow.
+unsafe fn first_arg(list: &WordList) -> Option<&str> {
+    // SAFETY: Caller guarantees `list` and its nested pointers are valid for the borrow.
     unsafe {
-        if list.is_null() {
-            return None;
-        }
-        let word_desc = (*list).word;
+        let word_desc = list.word;
         if word_desc.is_null() {
             return None;
         }
@@ -91,7 +92,7 @@ unsafe fn first_arg(list: *mut WordList) -> Option<&'static str> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bash_autosuggest_builtin(list: *mut WordList) -> c_int {
     // SAFETY: `list` validity is upheld by the caller (Bash builtin dispatcher).
-    let subcmd = unsafe { first_arg(list) }.unwrap_or("enable");
+    let subcmd = unsafe { list.as_ref().and_then(|node| first_arg(node)) }.unwrap_or("enable");
     match subcmd {
         "enable" | "on" => {
             hook::enable();

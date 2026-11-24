@@ -40,8 +40,10 @@ pub const RL_STATE_SUPPRESS_MASK: c_ulong = RL_STATE_ISEARCH
     | RL_STATE_CHARSEARCH
     | RL_STATE_DONE;
 
-/// Readline keymap entry type for a bound C function (`ISFUNC`).
+/// Readline keymap entry types from `keymaps.h`.
 pub const ISFUNC: c_int = 0;
+pub const ISKMAP: c_int = 1;
+pub const ISMACR: c_int = 2;
 
 /// Opaque Readline keymap pointer (`Keymap`).
 pub type Keymap = *mut c_void;
@@ -111,13 +113,16 @@ unsafe extern "C" {
     pub static mut rl_redisplay_function: Option<RlVoidFunc>;
     pub static mut rl_pre_input_hook: Option<RlHookFunc>;
     pub static mut rl_outstream: *mut File;
-    pub static mut _rl_last_c_pos: c_int;
+    pub static mut rl_display_prompt: *const c_char;
+    pub static mut rl_prompt: *const c_char;
 
     // --- GNU Readline keymaps ---
     pub static mut emacs_standard_keymap: c_void;
     pub static mut vi_insertion_keymap: c_void;
+    pub static mut vi_movement_keymap: c_void;
 
     // --- GNU Readline functions ---
+    pub fn rl_get_keymap() -> Keymap;
     pub fn rl_redisplay();
     pub fn rl_insert_text(text: *const c_char) -> c_int;
     pub fn rl_forward_char(count: c_int, key: c_int) -> c_int;

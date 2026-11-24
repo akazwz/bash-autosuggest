@@ -143,6 +143,139 @@ pub fn char_display_width(ch: char) -> usize {
     1
 }
 
+/// Compute the number of remaining terminal columns available for ghost text on the
+/// current display row, leaving a 1-column right margin to prevent auto-wrap.
+///
+/// Handles:
+/// - Multi-line prompts (only measures from after the final `\n`).
+/// - Readline invisible prompt markers (`\x01`..`\x02`) and raw ANSI CSI/OSC escapes.
+/// - UTF-8 / CJK / Emoji display widths and terminal line wrapping at `screen_cols`.
+pub fn remaining_line_columns(prompt_bytes: &[u8], line: &str, screen_cols: usize) -> usize {
+    if screen_cols <= 1 {
+        return 0;
+    }
+
+    let last_prompt_line = match prompt_bytes.iter().rposition(|&b| b == b'\n') {
+        Some(pos) => &prompt_bytes[pos + 1..],
+        None => prompt_bytes,
+    };
+
+    let mut col = 0usize;
+    measure_prompt_line(last_prompt_line, screen_cols, &mut col);
+
+    for ch in line.chars() {
+        match ch {
+            '\n' | '\r' => col = 0,
+            '\t' => {
+                let step = 8 - (col % 8);
+                advance_col(&mut col, step, screen_cols);
+            }
+            c if c.is_control() => advance_col(&mut col, 2, screen_cols),
+            c => advance_col(&mut col, char_display_width(c), screen_cols),
+        }
+    }
+
+    screen_cols.saturating_sub(col.saturating_add(1))
+}
+
+fn advance_col(col: &mut usize, width: usize, screen_cols: usize) {
+    if width == 0 {
+        return;
+    }
+    if *col >= screen_cols {
+        *col = 0;
+    }
+    if *col + width > screen_cols {
+        *col = width.min(screen_cols);
+    } else {
+        *col += width;
+    }
+}
+
+fn measure_prompt_line(bytes: &[u8], screen_cols: usize, col: &mut usize) {
+    let mut i = 0;
+    let mut ignoring = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            0x01 => {
+                ignoring = true;
+                i += 1;
+            }
+            0x02 => {
+                ignoring = false;
+                i += 1;
+            }
+            _ if ignoring => {
+                i += 1;
+            }
+            0x1b => {
+                i = skip_ansi_escape(bytes, i);
+            }
+            b'\r' => {
+                *col = 0;
+                i += 1;
+            }
+            b'\t' => {
+                let step = 8 - (*col % 8);
+                advance_col(col, step, screen_cols);
+                i += 1;
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len() && !matches!(bytes[i], 0x01 | 0x02 | 0x1b | b'\r' | b'\t') {
+                    i += 1;
+                }
+                for chunk in bytes[start..i].utf8_chunks() {
+                    for ch in chunk.valid().chars() {
+                        advance_col(col, char_display_width(ch), screen_cols);
+                    }
+                    if !chunk.invalid().is_empty() {
+                        advance_col(col, 1, screen_cols);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn skip_ansi_escape(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    if i >= bytes.len() {
+        return i;
+    }
+    match bytes[i] {
+        // CSI: ESC [ ... final byte 0x40..=0x7E
+        b'[' => {
+            i += 1;
+            while i < bytes.len() {
+                let b = bytes[i];
+                i += 1;
+                if (0x40..=0x7E).contains(&b) {
+                    break;
+                }
+            }
+            i
+        }
+        // OSC: ESC ] ... BEL or ST (ESC \)
+        b']' => {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == 0x07 {
+                    return i + 1;
+                }
+                if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                    return i + 2;
+                }
+                i += 1;
+            }
+            i
+        }
+        // Two-byte escape sequence (e.g. ESC =, ESC >)
+        _ => i + 1,
+    }
+}
+
 /// Validate a user-supplied ANSI SGR style string (e.g. `38;5;242`, `90`, `2;37`).
 /// Only digits and `;` are permitted so escape sequences cannot be injected.
 pub fn sanitize_sgr_style(raw: &str) -> Option<&str> {
@@ -232,5 +365,29 @@ mod tests {
         assert!(!is_supported_term(Some("dumb")));
         assert!(!is_supported_term(Some("")));
         assert!(!is_supported_term(None));
+    }
+
+    #[test]
+    fn computes_remaining_columns_for_ascii_cjk_ansi_and_wrapping() {
+        // Basic ASCII prompt + input: "$ " (2) + "ap" (2) = 4, cols=14 -> avail=9
+        assert_eq!(remaining_line_columns(b"$ ", "ap", 14), 9);
+
+        // CJK input: "$ " (2) + "echo 你好世界" (5 + 8 = 13) = 15 cols, cols=20 -> avail=4
+        assert_eq!(remaining_line_columns(b"$ ", "echo 你好世界", 20), 4);
+
+        // Readline \x01..\x02 invisible prompt sequences + multi-line prompt
+        let prompt = b"\x01\x1b[32m\x02user@host\x01\x1b[0m\x02\n\x01\x1b[1;34m\x02\xe2\x9d\xaf \x01\x1b[0m\x02";
+        // Last line is "❯ " -> 2 display cols + "ls" (2) = 4, cols=20 -> avail=15
+        assert_eq!(remaining_line_columns(prompt, "ls", 20), 15);
+
+        // Raw ANSI CSI/OSC escapes without \x01..\x02 markers
+        let raw_ansi = b"\x1b]0;title\x07\x1b[36m$ \x1b[0m";
+        assert_eq!(remaining_line_columns(raw_ansi, "abc", 10), 4);
+
+        // Wrapping onto next line: cols=10, "$ " (2) + "123456789" (9) -> col=1 on row 2 -> avail=8
+        assert_eq!(remaining_line_columns(b"$ ", "123456789", 10), 8);
+
+        // Exact right margin (col == screen_cols) leaves 0 columns to avoid deferred-wrap glitches
+        assert_eq!(remaining_line_columns(b"$ ", "12345678", 10), 0);
     }
 }

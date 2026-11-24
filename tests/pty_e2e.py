@@ -209,7 +209,7 @@ def test_core_interactions(so_path: str) -> None:
         assert b"\x1b[38;5;242m" not in out, f"Ghost appeared after unload: {out!r}"
         print("[PASS] Clean unload via 'enable -d'")
 
-        # 10. Narrow terminal column truncation (including CJK).
+        # 10. Narrow terminal column truncation (ASCII + CJK multibyte).
         os.write(fd, b"\x05\x15")
         os.write(fd, f"enable -f {so_path} bash_autosuggest && bash_autosuggest\n".encode())
         read_until_idle(fd, idle=0.2)
@@ -218,7 +218,67 @@ def test_core_interactions(so_path: str) -> None:
         out, _ = read_until_idle(fd, idle=0.2)
         # '$ ' (2) + 'ap' (2) = col 4; cols=14 -> avail=9 -> 't upgrade'
         assert b"\x1b[38;5;242mt upgrade\x1b[0m" in out, f"Narrow truncation failed: {out!r}"
-        print("[PASS] Narrow terminal column truncation")
+        print("[PASS] Narrow terminal ASCII column truncation")
+
+        os.write(fd, b"\x05\x15")
+        read_until_idle(fd, idle=0.15)
+        set_winsize(fd, 24, 20)
+        os.write(fd, "echo 中文测试".encode("utf-8"))
+        out, _ = read_until_idle(fd, idle=0.2)
+        # '$ ' (2) + 'echo 中文测试' (5 + 8 = 13) = 15 cols (19 UTF-8 bytes); cols=20 -> avail=4 -> '内容'
+        assert "\x1b[38;5;242m内容\x1b[0m".encode("utf-8") in out, (
+            f"Narrow CJK column truncation failed: {out!r}"
+        )
+        print("[PASS] Narrow terminal CJK column truncation")
+
+        # 11. Rapid double Alt+f accepts two distinct words without duplicating.
+        os.write(fd, b"\x05\x15")
+        read_until_idle(fd, idle=0.15)
+        set_winsize(fd, 24, 80)
+        os.write(fd, b"agy")
+        read_until_idle(fd, idle=0.15)
+        os.write(fd, b"\x1bf\x1bf")
+        out, _ = read_until_idle(fd, idle=0.2)
+        assert b" whoami" in out and b" --verbose" in out, f"Rapid double Alt+f failed: {out!r}"
+        assert b" whoami whoami" not in out, f"Rapid double Alt+f duplicated word: {out!r}"
+        print("[PASS] Rapid double Alt+f accepts consecutive words cleanly")
+    finally:
+        cleanup(pid, fd, hist_path)
+
+
+def test_vi_mode_and_style(so_path: str) -> None:
+    history = ["echo hello_vi_mode", "git status --short"]
+    pid, fd, hist_path = spawn_bash(so_path, history, cols=80)
+    try:
+        # Custom BASH_AUTOSUGGEST_STYLE + Vi editing mode.
+        os.write(
+            fd,
+            b"set -o vi; export BASH_AUTOSUGGEST_STYLE='90'; bash_autosuggest; bash_autosuggest status\n",
+        )
+        out, _ = read_until_idle(fd, idle=0.25)
+        assert b'style="90"' in out, f"Custom style not picked up: {out!r}"
+
+        # Ghost text renders with custom style in vi insert mode and accepts via Right Arrow.
+        os.write(fd, b"echo h")
+        out, _ = read_until_idle(fd, idle=0.15)
+        assert b"\x1b[90mello_vi_mode\x1b[0m" in out, f"Vi insert ghost failed: {out!r}"
+
+        # Switching to vi command mode via ESC clears ghost text cleanly (after keyseq-timeout).
+        os.write(fd, b"\x1b")
+        out, _ = read_until_idle(fd, idle=0.7)
+        assert b"\x1b[K" in out and b"\x1b[90m" not in out, (
+            f"Vi ESC to command mode did not clear ghost: {out!r}"
+        )
+
+        # Back to insert mode on a new line and accept full suggestion with Right Arrow.
+        os.write(fd, b"\x03")
+        read_until_idle(fd, idle=0.15)
+        os.write(fd, b"git s")
+        read_until_idle(fd, idle=0.15)
+        os.write(fd, b"\x1b[C")
+        out, _ = read_until_idle(fd, idle=0.2)
+        assert b"tatus --short" in out, f"Vi Right Arrow accept failed: {out!r}"
+        print("[PASS] Vi mode & custom BASH_AUTOSUGGEST_STYLE")
     finally:
         cleanup(pid, fd, hist_path)
 
@@ -256,6 +316,7 @@ def main() -> int:
 
     so_path = os.path.abspath(sys.argv[1])
     test_core_interactions(so_path)
+    test_vi_mode_and_style(so_path)
     test_dumb_term(so_path)
     test_10k_history_stress(so_path)
     print("All PTY E2E tests passed!")

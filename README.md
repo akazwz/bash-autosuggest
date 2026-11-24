@@ -26,7 +26,7 @@ Keyboard -> /bin/bash (native GNU Readline handles editing, Tab, Ctrl+R, UTF-8)
                 +-- rl_redisplay_function hook
                 |     -> reads Bash's live in-memory history_list()
                 |     -> byte-prefix short-circuit match (0 allocations)
-                |     -> computes remaining screen columns via _rl_last_c_pos
+                |     -> computes remaining screen columns via rl_display_prompt
                 |     -> draws grey ghost suffix after cursor
                 |
                 +-- Right Arrow / End / Ctrl+F / Alt+Right / Alt+f (when at EOL)
