@@ -1,0 +1,3 @@
+# Keep GitHub language statistics focused on runtime source code (Rust + Shell).
+tests/*.py linguist-detectable=false
+assets/*.svg linguist-generated=true
