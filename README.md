@@ -1,10 +1,58 @@
 # bash-autosuggest
 
-Zero-lag, Fish/Zsh-style inline history autosuggestions for **native Bash** — implemented in Rust as a tiny, zero-dependency Bash loadable builtin (`.so`) that hooks GNU Readline directly.
+[![CI](https://github.com/akazwz/bash-autosuggest/actions/workflows/ci.yml/badge.svg)](https://github.com/akazwz/bash-autosuggest/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/akazwz/bash-autosuggest?display_name=tag)](https://github.com/akazwz/bash-autosuggest/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Linux-x86__64%20%7C%20aarch64-informational)](#installation)
+[![Zero Dependencies](https://img.shields.io/badge/Rust%20crates-0%20dependencies-brightgreen)](Cargo.toml)
 
-- **Sub-millisecond latency**: zero heap allocations on the per-keystroke hot path, with byte-level prefix short-circuiting directly over Bash's in-memory `history_list()`. Scanning 10,000 history entries in the worst case takes **~0.09 ms**.
-- **100% native Bash**: no PTY wrapper, no 256-byte `bind -x` hijacking, no shell switching. Native `Tab` completion, `bash-completion`, `Ctrl+R`, UTF-8/CJK editing, `tmux`, scripts, and AI coding agents (`claude`, `codex`, `agy`, etc.) work completely untouched.
-- **Tiny & dependency-free**: ~340 KB stripped `.so`, **0 external Rust crates**, builds offline in < 0.5 s.
+**Zero-lag, Fish/Zsh-style inline history autosuggestions for native Bash** — implemented in Rust as a tiny, zero-dependency Bash loadable builtin (`.so`) that hooks GNU Readline directly.
+
+<p align="center">
+  <img src="assets/demo.svg" alt="bash-autosuggest terminal demo" width="780" />
+</p>
+
+- **Sub-millisecond latency**: zero heap allocations on the per-keystroke hot path, with byte-level prefix short-circuiting directly over Bash's in-memory `history_list()`. Scanning 10,000 history entries in the worst case takes **~0.1 ms**.
+- **100% native Bash**: no PTY wrapper, no 256-byte `bind -x` hijacking, no shell switching. Native `Tab` completion, `bash-completion`, `Ctrl+R`, Vi/Emacs modes, UTF-8/CJK prompts & input, `tmux`, scripts, and CLI agents (`claude`, `codex`, `agy`, etc.) work untouched.
+- **Tiny & dependency-free**: ~350 KB stripped `.so`, **0 external Rust crates**, 100% public GNU Readline APIs, builds offline in < 0.5 s.
+
+---
+
+## Quick Start
+
+Install the latest prebuilt `.so` (`x86_64` / `aarch64`, verifies `SHA256SUMS`, no Rust required) and enable it in `~/.bashrc`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh -s -- --update-bashrc
+exec bash
+```
+
+---
+
+## Keybindings & Usage
+
+| Key | Behavior (at end of line with ghost text) | Otherwise |
+| :--- | :--- | :--- |
+| `→` / `End` / `Ctrl+F` | Accept full suggestion | Normal `forward-char` / `end-of-line` |
+| `Alt+→` / `Alt+f` | Accept next word | Normal `forward-word` |
+| `←` / `Backspace` / `Tab` / `Ctrl+R` / `Enter` | Clears ghost text cleanly | Standard Readline behavior |
+
+### Configuration & Runtime Controls
+
+Customize the ghost text ANSI SGR style (default `38;5;242`):
+
+```bash
+export BASH_AUTOSUGGEST_STYLE="38;5;242"
+```
+
+Runtime builtin commands:
+
+```bash
+bash_autosuggest status    # show enabled state, style, and loaded history count
+bash_autosuggest disable   # restore original Readline hooks and keybindings
+bash_autosuggest enable    # re-enable hooks (also reloads BASH_AUTOSUGGEST_STYLE)
+enable -d bash_autosuggest # cleanly unload the shared library
+```
 
 ---
 
@@ -39,9 +87,9 @@ Keyboard -> /bin/bash (native GNU Readline handles editing, Tab, Ctrl+R, UTF-8)
 | :--- | :--- | :--- | :--- |
 | **Bash compatibility** | **100% native Bash** | 100% native Bash | Different shell |
 | **Architecture** | In-process `.so` Readline hook | Pure Bash script (~1 MB) | Native shell |
-| **10k-entry history scan** | **~0.09 ms** | Tens to hundreds of ms | < 1 ms |
+| **10k-entry history scan** | **~0.1 ms** | Tens to hundreds of ms | < 1 ms |
 | **Extra startup overhead** | **~0 ms** | Hundreds of ms to 1 s+ | Varies |
-| **Binary / dependencies** | **~340 KB `.so`, 0 crates** | ~1 MB scripts + caches | Full shell + plugins |
+| **Binary / dependencies** | **~350 KB `.so`, 0 crates** | ~1 MB scripts + caches | Full shell + plugins |
 | **History sync** | Direct `history_list()` read | Internal history mirror | Native |
 | **Scope** | Inline history suggestions only | Full syntax highlight + menus | Full shell UX |
 
@@ -49,23 +97,21 @@ Keyboard -> /bin/bash (native GNU Readline handles editing, Tab, Ctrl+R, UTF-8)
 
 ## Installation
 
-### 1. One-line install (Linux `x86_64` / `aarch64`, no Rust required)
+### 1. One-line install / update / uninstall (Linux `x86_64` / `aarch64`)
 
 Downloads the latest prebuilt `.so` from GitHub Releases, verifies `SHA256SUMS`, and installs atomically to `~/.local/lib/bash_autosuggest.so`:
 
 ```bash
+# Install (prints the ~/.bashrc snippet without editing your config)
 curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh
-```
 
-To also append a managed loader block to `~/.bashrc` automatically:
-
-```bash
+# Install and automatically add a managed loader block to ~/.bashrc
 curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh -s -- --update-bashrc
-```
 
-To uninstall (removes `~/.local/lib/bash_autosuggest.so` and the managed `~/.bashrc` block):
+# Update later (re-run the installer, then reload Bash)
+curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh && exec bash
 
-```bash
+# Uninstall (removes ~/.local/lib/bash_autosuggest.so and the managed ~/.bashrc block)
 curl -fsSL https://raw.githubusercontent.com/akazwz/bash-autosuggest/main/install.sh | sh -s -- --uninstall
 ```
 
@@ -107,37 +153,10 @@ Open a new terminal or run `exec bash`.
 
 ---
 
-## Keybindings & Usage
-
-| Key | Behavior (at end of line with ghost text) | Otherwise |
-| :--- | :--- | :--- |
-| `→` / `End` / `Ctrl+F` | Accept full suggestion | Normal `forward-char` / `end-of-line` |
-| `Alt+→` / `Alt+f` | Accept next word | Normal `forward-word` |
-| `←` / `Backspace` / `Tab` / `Ctrl+R` / `Enter` | Clears ghost text cleanly | Standard Readline behavior |
-
-### Configuration & Runtime Controls
-
-Customize the ghost text ANSI SGR style (default `38;5;242`):
-
-```bash
-export BASH_AUTOSUGGEST_STYLE="38;5;242"
-```
-
-Runtime builtin commands:
-
-```bash
-bash_autosuggest status    # show enabled state, style, and loaded history count
-bash_autosuggest disable   # restore original Readline hooks and keybindings
-bash_autosuggest enable    # re-enable hooks
-enable -d bash_autosuggest # cleanly unload the shared library
-```
-
----
-
 ## Requirements & Non-Goals
 
 - **Requirements**: Linux with Bash 5.x built with loadable builtin support (`enable -f`) and exported GNU Readline symbols (true by default on Debian 12/13, Ubuntu 22.04+, Fedora, Arch, RHEL 9+). Automatically disables itself on `TERM=dumb`.
-- **Non-Goals**: Real-time syntax highlighting and interactive popup completion menus. Keeping scope strictly focused on history autosuggestions is what keeps this plugin sub-millisecond and conflict-free.
+- **Non-Goals**: Real-time syntax highlighting and interactive popup completion menus. Keeping scope strictly focused on inline history suggestions is what keeps this plugin sub-millisecond and conflict-free.
 
 ## Development
 
